@@ -1,47 +1,46 @@
 # LabTether Linux Agent
 
-The Linux agent for [LabTether](https://labtether.com) — reports telemetry, executes actions, and enables remote access for your Linux machines.
+Telemetry, remote access, and actions for your Linux machines — reported back to your [LabTether](https://labtether.com) hub.
 
 ## Install
 
-Download the latest binary from [Releases](https://github.com/labtether/labtether-linux/releases/latest):
-
 ```bash
-curl -fsSL https://github.com/labtether/labtether-linux/releases/latest/download/labtether-agent-linux-amd64 -o /usr/local/bin/labtether-agent
-chmod +x /usr/local/bin/labtether-agent
+curl -fsSL https://github.com/labtether/labtether-linux/releases/latest/download/labtether-agent-linux-amd64 \
+  -o /usr/local/bin/labtether-agent && chmod +x /usr/local/bin/labtether-agent
 ```
 
-Then enroll with your hub:
+Enroll with your hub:
 
 ```bash
 labtether-agent --hub wss://your-hub:8443/ws/agent --enrollment-token YOUR_TOKEN
 ```
 
-For systemd service setup and full configuration, see the [agent setup guide](https://labtether.com/docs/wiki/agents/linux).
+For systemd service setup, see the [full guide](https://labtether.com/docs/wiki/agents/linux).
 
 ## What It Does
 
-- **System telemetry** — CPU, memory, disk, network, and temperature reported to your hub.
-- **Remote access** — Terminal and desktop sessions from the LabTether console.
-- **Service management** — Start, stop, and restart systemd services remotely.
-- **Package updates** — View and apply package updates across your fleet.
-- **Docker monitoring** — Container status, logs, and actions for Docker hosts.
+- **System telemetry** — CPU, memory, disk, network, and temperature. Reported every heartbeat.
+- **Remote terminal & desktop** — Open a shell or desktop session from the LabTether console. No SSH keys needed.
+- **Service management** — Start, stop, restart systemd services from the dashboard.
+- **Package updates** — See what's outdated. Apply updates across your fleet.
+- **Docker monitoring** — Container status, logs, and lifecycle actions for Docker hosts.
 
 ## Build From Source
 
-Requires Go 1.24+.
-
 ```bash
+# Requires Go 1.24+
 go build -o labtether-agent ./cmd/labtether-agent/
 ```
 
-For most users, download the pre-built binary from [Releases](https://github.com/labtether/labtether-linux/releases/latest) instead.
+Most users should grab the pre-built binary from [Releases](https://github.com/labtether/labtether-linux/releases/latest).
 
 ## Links
 
-- **LabTether Hub** — [github.com/labtether/labtether](https://github.com/labtether/labtether)
-- **Documentation** — [labtether.com/docs](https://labtether.com/docs)
-- **Website** — [labtether.com](https://labtether.com)
+| | |
+|---|---|
+| **LabTether Hub** | [github.com/labtether/labtether](https://github.com/labtether/labtether) |
+| **Docs** | [labtether.com/docs](https://labtether.com/docs) |
+| **Website** | [labtether.com](https://labtether.com) |
 
 ## License
 
