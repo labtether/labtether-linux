@@ -16,14 +16,27 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26'
       - name: Check formatting
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         shell: bash
         run: |
-          unformatted="$(gofmt -l .)"
+          if [[ -z "${BASE_SHA}" || "${BASE_SHA}" =~ ^0+$ ]]; then
+            mapfile -d '' go_files < <(git ls-files -z '*.go')
+          else
+            mapfile -d '' go_files < <(
+              git diff --name-only --diff-filter=ACMR -z "${BASE_SHA}" HEAD -- '*.go'
+            )
+          fi
+          if (( ${#go_files[@]} == 0 )); then
+            exit 0
+          fi
+          unformatted="$(gofmt -l "${go_files[@]}")"
           if [[ -n "${unformatted}" ]]; then
             printf '::error title=Go formatting required::Format these files: %s\n' "${unformatted//$'\n'/, }"
             exit 1
