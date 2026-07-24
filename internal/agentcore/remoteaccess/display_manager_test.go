@@ -1,6 +1,8 @@
 package remoteaccess
 
 import (
+	"errors"
+	"os/exec"
 	"sync"
 	"testing"
 
@@ -90,6 +92,18 @@ func TestDisplayManagerActiveDisplays(t *testing.T) {
 // being started by another goroutine.
 func TestDisplayManagerAcquireSkipsPlaceholder(t *testing.T) {
 	dm := NewDisplayManager()
+	originalStartXvfb := StartDesktopXvfb
+	originalFindDisplay := FindDesktopFreeDisplay
+	t.Cleanup(func() {
+		StartDesktopXvfb = originalStartXvfb
+		FindDesktopFreeDisplay = originalFindDisplay
+	})
+	FindDesktopFreeDisplay = func() int { return 99 }
+	startedDisplay := -1
+	StartDesktopXvfb = func(display, width, height int) (*exec.Cmd, string, error) {
+		startedDisplay = display
+		return nil, "", errors.New("forced Xvfb failure")
+	}
 
 	// Insert a placeholder that mimics an in-flight acquire (refCount=1, xvfbCmd=nil).
 	dm.Mu.Lock()
@@ -123,6 +137,9 @@ func TestDisplayManagerAcquireSkipsPlaceholder(t *testing.T) {
 	_, _, _ = dm.acquire()
 
 	refAfter := before()
+	if startedDisplay == 99 {
+		t.Fatal("acquire reused the display reserved by an in-flight placeholder")
+	}
 	// The placeholder refCount must be unchanged.
 	if refAfter != -1 && refAfter != refBefore {
 		t.Fatalf("placeholder refCount changed from %d to %d; acquire must skip placeholders", refBefore, refAfter)
@@ -135,11 +152,23 @@ func TestDisplayManagerAcquireSkipsPlaceholder(t *testing.T) {
 // number, forcing the race condition to manifest if the placeholder is absent.
 func TestDisplayManagerAcquireNoConcurrentDuplicate(t *testing.T) {
 	dm := NewDisplayManager()
+	originalStartXvfb := StartDesktopXvfb
+	originalFindDisplay := FindDesktopFreeDisplay
+	t.Cleanup(func() {
+		StartDesktopXvfb = originalStartXvfb
+		FindDesktopFreeDisplay = originalFindDisplay
+	})
+	FindDesktopFreeDisplay = func() int { return 96 }
+	started := make(chan int, 2)
+	releaseStarts := make(chan struct{})
+	StartDesktopXvfb = func(display, width, height int) (*exec.Cmd, string, error) {
+		started <- display
+		<-releaseStarts
+		return nil, "", errors.New("forced Xvfb failure")
+	}
 
 	// Run two goroutines that both attempt acquire at the same time.
-	// Both will fail (no Xvfb) but we verify that at most one placeholder
-	// was inserted simultaneously (the second caller picks a fresh display
-	// number because the first's placeholder is visible under the lock).
+	// Both are held inside the fake Xvfb start so their reservations overlap.
 	var wg sync.WaitGroup
 	results := make([]string, 2)
 	for i := 0; i < 2; i++ {
@@ -151,8 +180,14 @@ func TestDisplayManagerAcquireNoConcurrentDuplicate(t *testing.T) {
 			results[i] = d
 		}()
 	}
+	firstDisplay := <-started
+	secondDisplay := <-started
+	close(releaseStarts)
 	wg.Wait()
 
+	if firstDisplay == secondDisplay {
+		t.Fatalf("concurrent acquires reserved duplicate display :%d", firstDisplay)
+	}
 	// After both goroutines finish (with errors), the map must be empty
 	// (both placeholders cleaned up on failure).
 	dm.Mu.Lock()

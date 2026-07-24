@@ -338,6 +338,7 @@ func TestDiscoverPortScannedServices(t *testing.T) {
 
 	t.Setenv("LABTETHER_WEBSVC_PORTSCAN_DISABLED", "false")
 	t.Setenv("LABTETHER_WEBSVC_PORTSCAN_PORTS", strconv.Itoa(port))
+	t.Setenv("LABTETHER_WEBSVC_PORTSCAN_INCLUDE_LISTENING", "false")
 
 	wsc := &WebServiceCollector{
 		assetID: "asset-1",
