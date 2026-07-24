@@ -12,17 +12,25 @@ import (
 // network statistics interface at /sys/class/net/{name}/statistics/.
 // Returns zeroes if any file cannot be read.
 func ReadIfaceStats(name string) (rxBytes, txBytes, rxPackets, txPackets uint64) {
-	base := "/sys/class/net/" + name + "/statistics/"
-	rxBytes = readUint64File(base + "rx_bytes")
-	txBytes = readUint64File(base + "tx_bytes")
-	rxPackets = readUint64File(base + "rx_packets")
-	txPackets = readUint64File(base + "tx_packets")
+	if !validLinuxInterfaceName(name) {
+		return
+	}
+	statsRoot, err := os.OpenRoot("/sys/class/net/" + name + "/statistics")
+	if err != nil {
+		return
+	}
+	defer statsRoot.Close()
+
+	rxBytes = readUint64File(statsRoot, "rx_bytes")
+	txBytes = readUint64File(statsRoot, "tx_bytes")
+	rxPackets = readUint64File(statsRoot, "rx_packets")
+	txPackets = readUint64File(statsRoot, "tx_packets")
 	return
 }
 
 // readUint64File reads a single uint64 value from a sysfs file.
-func readUint64File(path string) uint64 {
-	data, err := os.ReadFile(path)
+func readUint64File(root *os.Root, name string) uint64 {
+	data, err := root.ReadFile(name)
 	if err != nil {
 		return 0
 	}
@@ -31,4 +39,11 @@ func readUint64File(path string) uint64 {
 		return 0
 	}
 	return v
+}
+
+func validLinuxInterfaceName(name string) bool {
+	return name != "" &&
+		name != "." &&
+		name != ".." &&
+		!strings.ContainsAny(name, "/\\\x00")
 }
