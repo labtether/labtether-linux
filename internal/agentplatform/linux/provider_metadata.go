@@ -341,12 +341,23 @@ func readDiskCapacityBytes(path string) (totalBytes uint64, availableBytes uint6
 		return 0, 0
 	}
 
-	blockSize := uint64(stats.Bsize)
-	if blockSize == 0 {
+	if stats.Bsize <= 0 {
 		return 0, 0
 	}
+	blockSize := uint64(stats.Bsize)
+	return saturatingLinuxBlockBytes(stats.Blocks, blockSize),
+		saturatingLinuxBlockBytes(stats.Bavail, blockSize)
+}
 
-	return stats.Blocks * blockSize, stats.Bavail * blockSize
+func saturatingLinuxBlockBytes(blocks, blockSize uint64) uint64 {
+	if blocks == 0 || blockSize == 0 {
+		return 0
+	}
+	maxUint64 := ^uint64(0)
+	if blocks > maxUint64/blockSize {
+		return maxUint64
+	}
+	return blocks * blockSize
 }
 
 func readNetworkInterfaceCount() int {
@@ -377,6 +388,10 @@ func readNetworkInterfaceCount() int {
 }
 
 func parseKeyValueFile(path string) (map[string]string, error) {
+	if path != "/etc/os-release" {
+		return nil, fmt.Errorf("metadata file is not allowlisted: %s", path)
+	}
+	// #nosec G304 -- path is checked against the exact allowlist above.
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -406,6 +421,10 @@ func parseKeyValueFile(path string) (map[string]string, error) {
 }
 
 func readTrimmedFile(path string) string {
+	if !isAllowedTrimmedMetadataPath(path) {
+		return ""
+	}
+	// #nosec G304 -- path is checked against the exact allowlist above.
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return ""
@@ -415,6 +434,29 @@ func readTrimmedFile(path string) string {
 		return ""
 	}
 	return value
+}
+
+func isAllowedTrimmedMetadataPath(path string) bool {
+	switch path {
+	case "/proc/sys/kernel/osrelease",
+		"/proc/sys/kernel/version",
+		"/sys/class/dmi/id/sys_vendor",
+		"/sys/class/dmi/id/product_name",
+		"/sys/class/dmi/id/product_version",
+		"/sys/class/dmi/id/board_vendor",
+		"/sys/class/dmi/id/board_name",
+		"/sys/class/dmi/id/board_version",
+		"/sys/class/dmi/id/chassis_vendor",
+		"/sys/class/dmi/id/chassis_type",
+		"/sys/class/dmi/id/bios_vendor",
+		"/sys/class/dmi/id/bios_version",
+		"/sys/class/dmi/id/bios_date",
+		"/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq",
+		"/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq":
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeChassisType(raw string) string {

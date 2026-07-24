@@ -47,8 +47,39 @@ func (dm *DisplayManager) acquire() (display, xauthPath string, err error) {
 	}
 
 	// Reserve a display number under the lock to prevent concurrent duplicates.
+	// FindDesktopFreeDisplay only sees X11 lock files. A second goroutine can
+	// arrive before the first Xvfb process creates its lock file, so also skip
+	// every display already reserved in this manager.
 	displayNum := FindDesktopFreeDisplay()
-	displayStr := fmt.Sprintf(":%d", displayNum)
+	candidates := []int{displayNum}
+	for candidate := 99; candidate >= 90; candidate-- {
+		if candidate != displayNum {
+			candidates = append(candidates, candidate)
+		}
+	}
+	reservedDisplayNum := -1
+	displayStr := ""
+	for index, candidate := range candidates {
+		candidateDisplay := fmt.Sprintf(":%d", candidate)
+		if _, alreadyManaged := dm.Displays[candidateDisplay]; alreadyManaged {
+			continue
+		}
+		// The preferred value came from FindDesktopFreeDisplay, so trust it.
+		// Fallbacks must still be checked against external X servers.
+		if index > 0 {
+			lockFile := fmt.Sprintf("/tmp/.X%d-lock", candidate)
+			if _, statErr := os.Stat(lockFile); statErr == nil || !os.IsNotExist(statErr) {
+				continue
+			}
+		}
+		reservedDisplayNum = candidate
+		displayStr = candidateDisplay
+		break
+	}
+	if reservedDisplayNum < 0 {
+		dm.Mu.Unlock()
+		return "", "", fmt.Errorf("failed to reserve Xvfb display: no free display slot")
+	}
 	placeholder := &ManagedDisplay{
 		display:  displayStr,
 		refCount: 1,
@@ -57,7 +88,7 @@ func (dm *DisplayManager) acquire() (display, xauthPath string, err error) {
 	dm.Mu.Unlock()
 
 	// Start Xvfb outside the lock (slow operation).
-	xvfbCmd, xauth, xvfbErr := StartDesktopXvfb(displayNum, 1920, 1080)
+	xvfbCmd, xauth, xvfbErr := StartDesktopXvfb(reservedDisplayNum, 1920, 1080)
 	if xvfbErr != nil {
 		dm.Mu.Lock()
 		delete(dm.Displays, displayStr)
