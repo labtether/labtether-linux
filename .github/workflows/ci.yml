@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  fast-contracts:
+    name: Fast Linux agent contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26'
+      - name: Check formatting
+        shell: bash
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [[ -n "${unformatted}" ]]; then
+            printf '::error title=Go formatting required::Format these files: %s\n' "${unformatted//$'\n'/, }"
+            exit 1
+          fi
+      - name: Vet
+        run: |
+          go vet ./...
+      - name: Race and behavior tests
+        run: |
+          go test -race ./...
+      - name: Build installed Linux command
+        run: |
+          go build -trimpath -o "${RUNNER_TEMP}/labtether-agent" ./cmd/labtether-agent
+      - name: Verify installed command starts
+        run: |
+          "${RUNNER_TEMP}/labtether-agent" --help >/dev/null
+      - name: Install pinned source-quality tools
+        env:
+          GOBIN: ${{ runner.temp }}/quality-bin
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.25.0
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          go install github.com/zricethezav/gitleaks/v8@v8.30.1
+          echo "${GOBIN}" >> "${GITHUB_PATH}"
+      - name: Security and workflow contracts
+        run: |
+          gosec -quiet ./...
+          actionlint
+          gitleaks dir . --no-banner --redact --timeout 300
+
+  cross-platform-source-contract:
+    name: Source portability (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: freebsd
+            goarch: amd64
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26'
+      - name: Compile command and test packages
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p "${RUNNER_TEMP}/test-binaries"
+          go build -trimpath -o "${RUNNER_TEMP}/labtether-agent-${GOOS}-${GOARCH}" ./cmd/labtether-agent
+          go test -c -o "${RUNNER_TEMP}/test-binaries/" ./...

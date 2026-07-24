@@ -1,11 +1,16 @@
-# LabTether Linux Agent
+# LabTether Linux Agent Compatibility Source
 
 Telemetry, remote access, and actions for your Linux machines — reported back to your [LabTether](https://labtether.com) hub.
+
+This repository is independently tested compatibility source. Official Linux
+agent binaries are built and published by the canonical
+[`labtether-agent`](https://github.com/labtether/labtether-agent) repository;
+this repository does not publish a second competing release line.
 
 ## Install
 
 ```bash
-curl -fsSL https://github.com/labtether/labtether-linux/releases/latest/download/labtether-agent-linux-amd64 \
+curl -fsSL https://github.com/labtether/labtether-agent/releases/latest/download/labtether-agent-linux-amd64 \
   -o /usr/local/bin/labtether-agent && chmod +x /usr/local/bin/labtether-agent
 ```
 
@@ -32,7 +37,8 @@ For systemd service setup, see the [full guide](https://labtether.com/docs/wiki/
 go build -o labtether-agent ./cmd/labtether-agent/
 ```
 
-Most users should grab the pre-built binary from [Releases](https://github.com/labtether/labtether-linux/releases/latest).
+Most users should grab the pre-built binary from the canonical
+[`labtether-agent` releases](https://github.com/labtether/labtether-agent/releases/latest).
 
 ## Links
 
