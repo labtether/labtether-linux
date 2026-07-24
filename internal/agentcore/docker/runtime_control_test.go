@@ -261,6 +261,7 @@ func TestDockerExecManagerHandleExecStartStreamsOutputAndCleansUp(t *testing.T) 
 		case r.Method == http.MethodPost && r.URL.Path == "/containers/ct-1/exec":
 			_ = json.NewEncoder(w).Encode(map[string]string{"Id": "exec-1"})
 		case r.Method == http.MethodPost && r.URL.Path == "/exec/exec-1/start":
+			_, _ = io.Copy(io.Discard, r.Body)
 			hijacker, ok := w.(http.Hijacker)
 			if !ok {
 				t.Fatal("docker exec test server does not support hijacking")
