@@ -22,13 +22,14 @@ import (
 
 // TerminalSession tracks an active PTY shell session on the agent.
 type TerminalSession struct {
-	sessionID string
-	Ptmx      *os.File
-	cmd       *exec.Cmd
-	done      chan struct{}
+	sessionID  string
+	Ptmx       *os.File
+	cmd        *exec.Cmd
+	outputDone chan struct{}
 }
 
 const MaxTerminalSessions = 10
+const terminalOutputDrainTimeout = 2 * time.Second
 
 // TerminalManager manages PTY sessions on the agent.
 type TerminalManager struct {
@@ -144,10 +145,10 @@ func (tm *TerminalManager) HandleTerminalStart(transport MessageSender, msg agen
 	}
 
 	sess := &TerminalSession{
-		sessionID: req.SessionID,
-		Ptmx:      ptmx,
-		cmd:       cmd,
-		done:      make(chan struct{}),
+		sessionID:  req.SessionID,
+		Ptmx:       ptmx,
+		cmd:        cmd,
+		outputDone: make(chan struct{}),
 	}
 
 	tm.Mu.Lock()
@@ -158,12 +159,21 @@ func (tm *TerminalManager) HandleTerminalStart(transport MessageSender, msg agen
 	sendTerminalStartedWithTmux(transport, req.SessionID, tmuxAttached)
 
 	// Stream PTY output → hub
-	go tm.streamOutput(transport, sess)
+	go func() {
+		defer close(sess.outputDone)
+		tm.streamOutput(transport, sess)
+	}()
 
-	// Wait for process exit and clean up
+	// Wait for process exit, then let the PTY reader drain the child's final
+	// output before closing the descriptor and notifying the hub.
 	go func() {
 		_ = cmd.Wait()
-		close(sess.done)
+		select {
+		case <-sess.outputDone:
+		case <-time.After(terminalOutputDrainTimeout):
+			_ = sess.Ptmx.Close()
+			<-sess.outputDone
+		}
 		tm.cleanup(req.SessionID)
 		SendTerminalClosed(transport, req.SessionID, "shell exited")
 	}()
