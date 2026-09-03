@@ -33,6 +33,25 @@ func TestResolveWebRTCDisplay(t *testing.T) {
 	}
 }
 
+func TestNormalizeX11DisplayIdentifierRequiresLocalDisplay(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want string
+	}{
+		{raw: " :0 ", want: ":0"},
+		{raw: ":12.1", want: ":12.1"},
+		{raw: "localhost:10.0", want: ""},
+		{raw: ":../../tmp/bad", want: ""},
+		{raw: "Display 1", want: ""},
+	}
+
+	for _, test := range tests {
+		if got := NormalizeX11DisplayIdentifier(test.raw); got != test.want {
+			t.Fatalf("NormalizeX11DisplayIdentifier(%q)=%q, want %q", test.raw, got, test.want)
+		}
+	}
+}
+
 func TestResolveWebRTCDisplayWaylandIgnoresX11Selection(t *testing.T) {
 	caps := agentmgr.WebRTCCapabilitiesData{
 		DesktopSessionType: DesktopSessionTypeWayland,
