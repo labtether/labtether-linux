@@ -69,3 +69,11 @@ func TestNormalizeAgentSettingValueDockerEndpointUnixSchemeCaseInsensitive(t *te
 		t.Fatalf("NormalizeAgentSettingValue returned %q; want unix:///var/run/docker.sock", normalized)
 	}
 }
+
+func TestNormalizeAgentSettingValueDockerEndpointRejectsNetworkPathPrefix(t *testing.T) {
+	for _, endpoint := range []string{"//server/docker.sock", `/\\server/docker.sock`} {
+		if _, err := NormalizeAgentSettingValue(SettingKeyDockerEndpoint, endpoint); err == nil {
+			t.Fatalf("network-path endpoint %q was accepted", endpoint)
+		}
+	}
+}
