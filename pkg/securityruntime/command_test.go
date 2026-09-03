@@ -4,9 +4,26 @@ import "testing"
 
 func TestValidateExecBinaryAllowsUnknownWhenAllowlistDisabled(t *testing.T) {
 	t.Setenv(envExecAllowlistMode, "false")
+	t.Setenv(envExecAllowlistAcceptRisk, "true")
 	t.Setenv(envExecAllowedBinaries, "")
 	if err := ValidateExecBinary("custom-binary"); err != nil {
 		t.Fatalf("expected command to be allowed when allowlist mode is disabled, got %v", err)
+	}
+}
+
+func TestValidateExecBinaryBlocksWhenAllowlistDisabledWithoutAcceptRisk(t *testing.T) {
+	t.Setenv(envExecAllowlistMode, "false")
+	t.Setenv(envExecAllowlistAcceptRisk, "")
+	if err := ValidateExecBinary("custom-binary"); err == nil {
+		t.Fatalf("expected command to be blocked when allowlist is disabled without accept-risk flag")
+	}
+}
+
+func TestValidateShellCommandBlocksWhenAllowlistDisabledWithoutAcceptRisk(t *testing.T) {
+	t.Setenv(envShellAllowlistMode, "false")
+	t.Setenv(envShellAllowlistAcceptRisk, "")
+	if err := ValidateShellCommand("whoami"); err == nil {
+		t.Fatalf("expected shell command to be blocked when allowlist is disabled without accept-risk flag")
 	}
 }
 
@@ -26,12 +43,30 @@ func TestValidateExecBinaryBlocksWhenAllowlistEnabled(t *testing.T) {
 	}
 }
 
-func TestValidateExecBinaryAllowsDefaultX11Utilities(t *testing.T) {
+func TestValidateExecBinaryAllowsDefaultDesktopUtilities(t *testing.T) {
 	t.Setenv(envExecAllowlistMode, "")
 	t.Setenv(envExecAllowedBinaries, "")
-	for _, name := range []string{"xdotool", "xset"} {
+	for _, name := range []string{"wl-copy", "wl-paste", "xauth", "xclip", "xdotool", "xsel", "xset", "ydotool"} {
 		if err := ValidateExecBinary(name); err != nil {
 			t.Fatalf("expected %q to be allowlisted, got %v", name, err)
+		}
+	}
+}
+
+func TestValidateExecBinaryNormalizesWindowsExecutableExtension(t *testing.T) {
+	t.Setenv(envExecAllowlistMode, "")
+	t.Setenv(envExecAllowedBinaries, "")
+	for _, name := range []string{
+		`C:\Windows\System32\cmd.exe`,
+		`C:\Windows\System32\netsh.exe`,
+		`C:\Windows\System32\sc.exe`,
+		`C:\Windows\System32\schtasks.exe`,
+		`C:\Windows\System32\wevtutil.exe`,
+		`C:\Users\operator\AppData\Local\Microsoft\WindowsApps\winget.exe`,
+		`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.EXE`,
+	} {
+		if err := ValidateExecBinary(name); err != nil {
+			t.Fatalf("expected Windows executable %q to match the extensionless allowlist: %v", name, err)
 		}
 	}
 }
@@ -54,6 +89,41 @@ func TestValidateShellCommandAllowlist(t *testing.T) {
 	}
 }
 
+func TestValidateShellCommandRejectsPrefixAndShellOperatorBypasses(t *testing.T) {
+	t.Setenv(envShellAllowlistMode, "true")
+	t.Setenv(envShellAllowlistPrefixes, "uptime,systemctl status")
+
+	for _, command := range []string{
+		"uptime-now",
+		"uptime; id",
+		"uptime && id",
+		"uptime | id",
+		"systemctl statusx sshd",
+		"systemctl status sshd > /tmp/output",
+		"uptime\nid",
+	} {
+		if err := ValidateShellCommand(command); err == nil {
+			t.Fatalf("expected bypass attempt %q to be rejected", command)
+		}
+	}
+}
+
+func TestParseCommandLinePreservesLiteralQuotedArguments(t *testing.T) {
+	args, err := ParseCommandLine(`grep "hello world" '/tmp/a file'`)
+	if err != nil {
+		t.Fatalf("ParseCommandLine: %v", err)
+	}
+	want := []string{"grep", "hello world", "/tmp/a file"}
+	if len(args) != len(want) {
+		t.Fatalf("args = %#v, want %#v", args, want)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("args = %#v, want %#v", args, want)
+		}
+	}
+}
+
 func TestValidateShellCommandAllowlistEnabledByDefault(t *testing.T) {
 	t.Setenv(envShellAllowlistMode, "")
 	if err := ValidateShellCommand("uptime"); err != nil {
@@ -61,6 +131,54 @@ func TestValidateShellCommandAllowlistEnabledByDefault(t *testing.T) {
 	}
 	if err := ValidateShellCommand("echo hello"); err == nil {
 		t.Fatalf("expected non-allowlisted command to be blocked by default")
+	}
+}
+
+func TestValidateShellCommandAllowsNarrowWindowsEchoProbe(t *testing.T) {
+	t.Setenv(envShellAllowlistMode, "")
+	t.Setenv(envShellAllowlistPrefixes, "")
+
+	for _, command := range []string{
+		"cmd /c echo labtether-windows-agent-command-ok",
+		"CMD /C ECHO LabTether_probe.v1:ok",
+		`cmd /c echo "quoted-safe-marker"`,
+	} {
+		if err := ValidateShellCommand(command); err != nil {
+			t.Fatalf("expected narrow Windows echo probe %q to be allowed: %v", command, err)
+		}
+	}
+}
+
+func TestValidateShellCommandRejectsWindowsCmdInterpreterBypasses(t *testing.T) {
+	t.Setenv(envShellAllowlistMode, "")
+	t.Setenv(envShellAllowlistPrefixes, "")
+
+	for _, command := range []string{
+		"cmd /c echo",
+		"cmd /c whoami",
+		"cmd /k echo ok",
+		`cmd /c "echo ok & whoami"`,
+		`cmd /c echo "ok & whoami"`,
+		`cmd /c echo "ok | whoami"`,
+		`cmd /c echo "ok > C:\\Temp\\probe.txt"`,
+		`cmd /c echo "ok < C:\\Temp\\probe.txt"`,
+		"cmd /c echo %PATH%",
+		"cmd /c echo !COMSPEC!",
+		"cmd /c echo $(whoami)",
+		"cmd /c echo `whoami`",
+		"cmd /c echo ok && whoami",
+		"cmd /c echo ok & whoami",
+		"cmd /c echo ok | whoami",
+		"cmd /c echo ok > probe.txt",
+		"cmd /c echo ok\nwhoami",
+		"cmd /c echo ok\r\nwhoami",
+		"cmd /c echo shutdown",
+		"cmd /c echo ok /?",
+		"cmd /c echo 日本語",
+	} {
+		if err := ValidateShellCommand(command); err == nil {
+			t.Fatalf("expected Windows cmd bypass attempt %q to be rejected", command)
+		}
 	}
 }
 

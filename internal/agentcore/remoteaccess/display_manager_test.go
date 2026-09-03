@@ -2,6 +2,7 @@ package remoteaccess
 
 import (
 	"errors"
+	"os"
 	"os/exec"
 	"sync"
 	"testing"
@@ -71,6 +72,47 @@ func TestDisplayManagerReleaseAtZeroRemovesEntry(t *testing.T) {
 	dm.Mu.Unlock()
 	if exists {
 		t.Fatal("expected display entry to be removed at refCount 0")
+	}
+}
+
+func TestDisplayManagerReleaseOnlyRemovesManagedXAuthority(t *testing.T) {
+	xauthFile, err := os.CreateTemp("", "labtether-xauth-99-*.xauth")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := xauthFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	dm := NewDisplayManager()
+	dm.Displays[":99"] = &ManagedDisplay{
+		display:   ":99",
+		xauthPath: xauthFile.Name(),
+		refCount:  1,
+	}
+	dm.release(":99")
+	if _, err := os.Stat(xauthFile.Name()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected managed Xauthority file to be removed, stat err=%v", err)
+	}
+
+	unrelatedFile, err := os.CreateTemp("", "unrelated-*.xauth")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelatedPath := unrelatedFile.Name()
+	if err := unrelatedFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(unrelatedPath) })
+
+	dm.Displays[":98"] = &ManagedDisplay{
+		display:   ":98",
+		xauthPath: unrelatedPath,
+		refCount:  1,
+	}
+	dm.release(":98")
+	if _, err := os.Stat(unrelatedPath); err != nil {
+		t.Fatalf("expected unrelated file to remain, stat err=%v", err)
 	}
 }
 
