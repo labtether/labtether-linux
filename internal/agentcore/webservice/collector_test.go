@@ -2,6 +2,7 @@ package webservice
 
 import (
 	"context"
+	"crypto/tls"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,23 @@ import (
 	dockerpkg "github.com/labtether/labtether-linux/internal/agentcore/docker"
 	"github.com/labtether/labtether-linux/pkg/agentmgr"
 )
+
+func TestNewWebServiceCollectorRequiresTLS12(t *testing.T) {
+	collector := NewWebServiceCollector(nil, "asset-1", "127.0.0.1", time.Minute, nil, WebServiceDiscoveryConfig{})
+
+	for name, client := range map[string]*http.Client{
+		"verified":          collector.client,
+		"opt-in unverified": collector.insecureClient,
+	} {
+		transport, ok := client.Transport.(*http.Transport)
+		if !ok || transport.TLSClientConfig == nil {
+			t.Fatalf("%s transport does not have an explicit TLS config", name)
+		}
+		if got := transport.TLSClientConfig.MinVersion; got < tls.VersionTLS12 {
+			t.Fatalf("%s transport minimum TLS version = %d, want at least TLS 1.2", name, got)
+		}
+	}
+}
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
