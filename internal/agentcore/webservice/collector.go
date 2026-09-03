@@ -119,11 +119,22 @@ func NewWebServiceCollector(transport Transport, assetID string, hostIP string, 
 		return http.ErrUseLastResponse // don't follow redirects
 	}
 	secureTransport := http.DefaultTransport.(*http.Transport).Clone()
+	if secureTransport.TLSClientConfig == nil {
+		secureTransport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	} else {
+		secureTransport.TLSClientConfig = secureTransport.TLSClientConfig.Clone()
+		if secureTransport.TLSClientConfig.MinVersion < tls.VersionTLS12 {
+			secureTransport.TLSClientConfig.MinVersion = tls.VersionTLS12
+		}
+	}
 	insecureTransport := http.DefaultTransport.(*http.Transport).Clone()
 	if insecureTransport.TLSClientConfig == nil {
-		insecureTransport.TLSClientConfig = &tls.Config{} // #nosec G402 -- discovery probe client only.
+		insecureTransport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12} // #nosec G402 -- discovery probe client only.
 	} else {
 		insecureTransport.TLSClientConfig = insecureTransport.TLSClientConfig.Clone()
+		if insecureTransport.TLSClientConfig.MinVersion < tls.VersionTLS12 {
+			insecureTransport.TLSClientConfig.MinVersion = tls.VersionTLS12
+		}
 	}
 	insecureTransport.TLSClientConfig.InsecureSkipVerify = true // #nosec G402 -- discovery probe client only.
 
