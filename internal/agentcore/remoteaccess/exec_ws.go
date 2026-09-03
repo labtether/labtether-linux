@@ -55,27 +55,30 @@ func HandleCommandRequest(transport MessageSender, msg agentmgr.Message, cfg Exe
 		return
 	}
 
-	timeout := DefaultCommandTimeout
-	if req.Timeout > 0 {
-		timeout = time.Duration(req.Timeout) * time.Second
-	}
-	if timeout > MaxRemoteCommandTimeout {
-		timeout = MaxRemoteCommandTimeout
-	}
+	timeout := remoteCommandTimeoutFromSeconds(req.Timeout)
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd, err := securityruntime.NewCommandContext(ctx, "sh", "-lc", req.Command)
+	cmd, err := securityruntime.NewValidatedShellCommandContext(ctx, req.Command)
 	if err != nil {
 		log.Printf("agentws: command blocked by runtime policy: %v", err)
 		sendCommandResult(transport, req, "failed", err.Error())
 		return
 	}
-	output, err := cmd.CombinedOutput()
+	output := securityruntime.NewCappedRetainingWriter(MaxCommandOutputBytes)
+	cmd.Stdout = output
+	cmd.Stderr = output
+	err = cmd.Run()
+
+	// Force-kill if the process survived the context timeout.
+	if ctx.Err() == context.DeadlineExceeded && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	}
 
 	status := "succeeded"
-	outputStr := TruncateCommandOutput(output, MaxCommandOutputBytes)
+	outputStr := retainedCommandOutput(output)
 	if ctx.Err() == context.DeadlineExceeded {
 		status = "failed"
 		if outputStr != "" {
@@ -259,6 +262,14 @@ func ValidateUpdatePackages(packages []string) error {
 		}
 	}
 	return nil
+}
+
+func retainedCommandOutput(output *securityruntime.CappedRetainingWriter) string {
+	retained := strings.TrimSpace(string(output.Bytes()))
+	if output.Truncated() {
+		retained += "\n...output truncated"
+	}
+	return retained
 }
 
 func TokenAllowsAnyCapability(token string, required ...string) (checked bool, allowed bool) {

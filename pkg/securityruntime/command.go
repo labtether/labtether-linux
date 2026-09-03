@@ -14,9 +14,11 @@ import (
 
 const (
 	envExecAllowlistMode        = "LABTETHER_EXEC_ALLOWLIST_MODE"
+	envExecAllowlistAcceptRisk  = "LABTETHER_EXEC_ALLOWLIST_ACCEPT_RISK"
 	envExecAllowedBinaries      = "LABTETHER_EXEC_ALLOWED_BINARIES"
 	envExecBlockedBinaries      = "LABTETHER_EXEC_BLOCKED_BINARIES"
 	envShellAllowlistMode       = "LABTETHER_SHELL_COMMAND_ALLOWLIST_MODE"
+	envShellAllowlistAcceptRisk = "LABTETHER_SHELL_COMMAND_ALLOWLIST_ACCEPT_RISK"
 	envShellAllowlistPrefixes   = "LABTETHER_SHELL_COMMAND_ALLOWLIST_PREFIXES"
 	envShellBlockedSubstrings   = "LABTETHER_SHELL_COMMAND_BLOCKED_SUBSTRINGS"
 	defaultShellCommandFallback = "command is required"
@@ -30,6 +32,7 @@ var defaultAllowedExecBinaries = []string{
 	"bash",
 	"brew",
 	"cat",
+	"choco",
 	"cmd",
 	"dash",
 	"defaults",
@@ -56,6 +59,7 @@ var defaultAllowedExecBinaries = []string{
 	"ls",
 	"lscpu",
 	"netplan",
+	"netsh",
 	"netstat",
 	"networksetup",
 	"needs-restarting",
@@ -72,11 +76,13 @@ var defaultAllowedExecBinaries = []string{
 	"pwsh",
 	"route",
 	"rpm",
+	"sc",
 	"sensors",
 	"sh",
 	"sysctl",
 	"system_profiler",
 	"systemctl",
+	"schtasks",
 	"tailscale",
 	"tail",
 	"tmux",
@@ -85,10 +91,15 @@ var defaultAllowedExecBinaries = []string{
 	"uptime",
 	"vncserver",
 	"tvnserver",
+	"wevtutil",
+	"winget",
 	"winvnc4",
 	"who",
+	"wl-copy",
+	"wl-paste",
 	"xvfb",
 	"x11vnc",
+	"xauth",
 	"xsetroot",
 	"xterm",
 	"yum",
@@ -103,6 +114,7 @@ var defaultAllowedExecBinaries = []string{
 }
 
 var defaultShellAllowlistPrefixes = []string{
+	"cmd /c echo",
 	"uptime",
 	"uname",
 	"df",
@@ -241,7 +253,14 @@ func normalizeExecutableName(name string) string {
 	if trimmed == "" {
 		return ""
 	}
-	return strings.ToLower(trimmed)
+	normalized := strings.ToLower(trimmed)
+	// Windows resolves executable names with PATHEXT and returns the concrete
+	// `.exe` path. The policy is intentionally defined in extensionless binary
+	// names so the same allowlist works across supported operating systems.
+	if strings.HasSuffix(normalized, ".exe") {
+		normalized = strings.TrimSuffix(normalized, ".exe")
+	}
+	return normalized
 }
 
 func normalizeShellCommand(raw string) string {
@@ -250,6 +269,129 @@ func normalizeShellCommand(raw string) string {
 		return ""
 	}
 	return strings.Join(parts, " ")
+}
+
+// ParseCommandLine parses the operator-supplied command into an executable and
+// argument vector without invoking a shell. Shell control operators are
+// rejected instead of being interpreted. This intentionally supports only the
+// quoting needed to pass literal arguments; expansion, redirection, pipelines,
+// command substitution, and compound commands are not part of the remote
+// command protocol.
+func ParseCommandLine(raw string) ([]string, error) {
+	const maxCommandBytes = 64 * 1024
+	if len(raw) > maxCommandBytes {
+		return nil, fmt.Errorf("command exceeds %d byte limit", maxCommandBytes)
+	}
+	if strings.IndexByte(raw, 0) >= 0 {
+		return nil, errors.New("command contains a NUL byte")
+	}
+
+	var (
+		args      []string
+		current   strings.Builder
+		quote     rune
+		escaped   bool
+		haveToken bool
+	)
+	flush := func() {
+		if haveToken {
+			args = append(args, current.String())
+			current.Reset()
+			haveToken = false
+		}
+	}
+
+	for _, r := range raw {
+		if escaped {
+			if r == '\n' || r == '\r' {
+				return nil, errors.New("multiline commands are not supported")
+			}
+			current.WriteRune(r)
+			haveToken = true
+			escaped = false
+			continue
+		}
+
+		if quote != 0 {
+			switch {
+			case r == quote:
+				quote = 0
+				haveToken = true
+			case r == '\\' && quote == '"':
+				escaped = true
+			case r == '\n' || r == '\r':
+				return nil, errors.New("multiline commands are not supported")
+			default:
+				current.WriteRune(r)
+				haveToken = true
+			}
+			continue
+		}
+
+		switch r {
+		case '\'', '"':
+			quote = r
+			haveToken = true
+		case '\\':
+			escaped = true
+			haveToken = true
+		case ' ', '\t':
+			flush()
+		case '\n', '\r':
+			return nil, errors.New("multiline commands are not supported")
+		case ';', '|', '&', '<', '>', '`':
+			return nil, fmt.Errorf("shell control operator %q is not supported", r)
+		default:
+			current.WriteRune(r)
+			haveToken = true
+		}
+	}
+	if escaped {
+		return nil, errors.New("command ends with an incomplete escape")
+	}
+	if quote != 0 {
+		return nil, errors.New("command contains an unterminated quote")
+	}
+	flush()
+	if len(args) == 0 || strings.TrimSpace(args[0]) == "" {
+		return nil, errors.New(defaultShellCommandFallback)
+	}
+	return args, nil
+}
+
+func commandArgsHavePrefix(args, prefix []string) bool {
+	if len(prefix) == 0 || len(args) < len(prefix) {
+		return false
+	}
+	for i := range prefix {
+		if !strings.EqualFold(args[i], prefix[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func validateWindowsCmdEcho(args []string) error {
+	if len(args) < 4 || normalizeExecutableName(args[0]) != "cmd" ||
+		!strings.EqualFold(args[1], "/c") || !strings.EqualFold(args[2], "echo") {
+		return fmt.Errorf("cmd /c is limited to an echo probe with a non-empty ASCII value")
+	}
+	for _, arg := range args[3:] {
+		if arg == "" {
+			return fmt.Errorf("cmd /c echo probe values must not be empty")
+		}
+		for _, char := range arg {
+			switch {
+			case char >= 'a' && char <= 'z':
+			case char >= 'A' && char <= 'Z':
+			case char >= '0' && char <= '9':
+			case char == '.', char == '_', char == '-', char == ':':
+			default:
+				return fmt.Errorf("cmd /c echo probe values may contain only ASCII letters, digits, dot, underscore, dash, or colon")
+			}
+		}
+	}
+	return nil
 }
 
 func toSet(values []string, normalize func(string) string) map[string]struct{} {
@@ -276,6 +418,9 @@ func ValidateExecBinary(name string) error {
 	}
 
 	if !parseBoolEnv(envExecAllowlistMode, true) {
+		if !parseBoolEnv(envExecAllowlistAcceptRisk, false) {
+			return fmt.Errorf("refusing to run %q: %s=false requires %s=true to acknowledge that disabling the exec allowlist removes a significant security control", normalized, envExecAllowlistMode, envExecAllowlistAcceptRisk)
+		}
 		return nil
 	}
 
@@ -300,10 +445,11 @@ func containsCommandToken(normalizedCmd, token string) bool {
 }
 
 func ValidateShellCommand(command string) error {
-	normalized := normalizeShellCommand(command)
-	if normalized == "" {
-		return errors.New(defaultShellCommandFallback)
+	args, parseErr := ParseCommandLine(command)
+	if parseErr != nil {
+		return parseErr
 	}
+	normalized := normalizeShellCommand(strings.Join(args, " "))
 
 	for _, blocked := range parseCSVEnv(envShellBlockedSubstrings, defaultShellBlockedSubstrings) {
 		token := normalizeShellCommand(blocked)
@@ -328,15 +474,23 @@ func ValidateShellCommand(command string) error {
 	}
 
 	if !parseBoolEnv(envShellAllowlistMode, true) {
+		if !parseBoolEnv(envShellAllowlistAcceptRisk, false) {
+			return fmt.Errorf("refusing shell command: %s=false requires %s=true to acknowledge that disabling the shell allowlist removes a significant security control", envShellAllowlistMode, envShellAllowlistAcceptRisk)
+		}
 		return nil
 	}
 
 	for _, prefix := range parseCSVEnv(envShellAllowlistPrefixes, defaultShellAllowlistPrefixes) {
-		normalizedPrefix := normalizeShellCommand(prefix)
-		if normalizedPrefix == "" {
+		prefixArgs, err := ParseCommandLine(prefix)
+		if err != nil || len(prefixArgs) == 0 {
 			continue
 		}
-		if strings.HasPrefix(normalized, normalizedPrefix) {
+		if commandArgsHavePrefix(args, prefixArgs) {
+			if normalizeExecutableName(args[0]) == "cmd" {
+				if err := validateWindowsCmdEcho(args); err != nil {
+					return err
+				}
+			}
 			return nil
 		}
 	}
@@ -344,12 +498,28 @@ func ValidateShellCommand(command string) error {
 	return fmt.Errorf("command not in allowlist")
 }
 
+// NewValidatedShellCommandContext returns a direct executable invocation for
+// an allowlisted remote command. Despite the historical name, no shell is
+// involved; callers cannot append operators to escape the allowlist.
+func NewValidatedShellCommandContext(ctx context.Context, command string) (*exec.Cmd, error) {
+	if err := ValidateShellCommand(command); err != nil {
+		return nil, err
+	}
+	args, err := ParseCommandLine(command)
+	if err != nil {
+		return nil, err
+	}
+	return NewCommandContext(ctx, args[0], args[1:]...)
+}
+
 func NewCommandContext(ctx context.Context, name string, args ...string) (*exec.Cmd, error) {
 	if err := ValidateExecBinary(name); err != nil {
 		return nil, err
 	}
 	// #nosec G204 -- command name is validated by ValidateExecBinary allowlist/policy.
-	return exec.CommandContext(ctx, name, args...), nil
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = SanitizedChildEnv()
+	return cmd, nil
 }
 
 func NewCommand(name string, args ...string) (*exec.Cmd, error) {
@@ -357,7 +527,9 @@ func NewCommand(name string, args ...string) (*exec.Cmd, error) {
 		return nil, err
 	}
 	// #nosec G204 -- command name is validated by ValidateExecBinary allowlist/policy.
-	return exec.Command(name, args...), nil
+	cmd := exec.Command(name, args...)
+	cmd.Env = SanitizedChildEnv()
+	return cmd, nil
 }
 
 func CommandContextCombinedOutput(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -365,7 +537,7 @@ func CommandContextCombinedOutput(ctx context.Context, name string, args ...stri
 	if err != nil {
 		return nil, err
 	}
-	return cmd.CombinedOutput()
+	return CaptureCombinedOutput(cmd, DefaultCommandOutputLimit)
 }
 
 func CommandCombinedOutput(name string, args ...string) ([]byte, error) {
@@ -373,7 +545,7 @@ func CommandCombinedOutput(name string, args ...string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return cmd.CombinedOutput()
+	return CaptureCombinedOutput(cmd, DefaultCommandOutputLimit)
 }
 
 func CommandContextOutput(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -381,7 +553,7 @@ func CommandContextOutput(ctx context.Context, name string, args ...string) ([]b
 	if err != nil {
 		return nil, err
 	}
-	return cmd.Output()
+	return CaptureOutput(cmd, DefaultCommandOutputLimit)
 }
 
 func CommandOutput(name string, args ...string) ([]byte, error) {
@@ -389,7 +561,7 @@ func CommandOutput(name string, args ...string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return cmd.Output()
+	return CaptureOutput(cmd, DefaultCommandOutputLimit)
 }
 
 func CommandRun(name string, args ...string) error {

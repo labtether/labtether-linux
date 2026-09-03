@@ -1,10 +1,12 @@
 package remoteaccess
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -132,11 +134,7 @@ func (dm *DisplayManager) release(display string) {
 
 	log.Printf("desktop: last consumer released %s, stopping Xvfb", display)
 	TerminateProcess(entry.xvfbCmd)
-	if entry.xauthPath != "" {
-		if err := os.Remove(entry.xauthPath); err != nil && !os.IsNotExist(err) {
-			log.Printf("desktop: remove xauth %s: %v", entry.xauthPath, err)
-		}
-	}
+	removeManagedXAuthority(entry.xauthPath)
 }
 
 // activeDisplays returns a list of currently managed displays.
@@ -162,11 +160,30 @@ func (dm *DisplayManager) CloseAll() {
 
 	for _, e := range entries {
 		TerminateProcess(e.xvfbCmd)
-		if e.xauthPath != "" {
-			if err := os.Remove(e.xauthPath); err != nil && !os.IsNotExist(err) {
-				log.Printf("desktop: remove xauth %s during shutdown: %v", e.xauthPath, err)
-			}
-		}
+		removeManagedXAuthority(e.xauthPath)
+	}
+}
+
+func removeManagedXAuthority(path string) {
+	cleaned := filepath.Clean(strings.TrimSpace(path))
+	if cleaned == "." || cleaned == "none" {
+		return
+	}
+	tempDir := filepath.Clean(os.TempDir())
+	relPath, err := filepath.Rel(tempDir, cleaned)
+	if err != nil || relPath != filepath.Base(relPath) ||
+		!strings.HasPrefix(relPath, "labtether-xauth-") || !strings.HasSuffix(relPath, ".xauth") {
+		log.Printf("desktop: refused to remove an unrecognized Xauthority path")
+		return
+	}
+	root, err := os.OpenRoot(tempDir)
+	if err != nil {
+		log.Printf("desktop: failed to open the temporary directory for Xauthority cleanup: %v", err)
+		return
+	}
+	defer root.Close()
+	if err := root.Remove(relPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Printf("desktop: failed to remove a managed Xauthority file: %v", err)
 	}
 }
 
