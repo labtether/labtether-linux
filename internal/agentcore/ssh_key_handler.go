@@ -105,7 +105,7 @@ func handleSSHKeyRemove(transport *wsTransport, msg agentmgr.Message) {
 		Data: data,
 	})
 
-	log.Printf("ssh-key: removed hub public key from %s", authKeysPath)
+	log.Printf("ssh-key: removed hub public key")
 }
 
 // removePublicKey removes a matching public key line from authorized_keys.
@@ -183,7 +183,7 @@ func installPublicKey(authKeysPath, pubKey string) error {
 	if len(existing) > 0 {
 		for _, line := range strings.Split(string(existing), "\n") {
 			if strings.TrimSpace(line) == keyLine {
-				log.Printf("ssh-key: public key already present in %s", authKeysPath)
+				log.Printf("ssh-key: public key already present")
 				return nil
 			}
 		}
