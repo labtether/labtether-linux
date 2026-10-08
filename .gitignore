@@ -1,1 +1,5 @@
 labtether-agent
+
+# Python helper cache
+__pycache__/
+*.py[cod]
