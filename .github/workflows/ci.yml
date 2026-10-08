@@ -23,10 +23,18 @@ jobs:
         run: python3 scripts/ci/check-line-limit.py
 
   fast-contracts:
+    needs: [line-limit]
+    if: always()
     name: Fast Linux agent contracts
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - name: Require source-size gate
+        shell: bash
+        env:
+          LINE_LIMIT_RESULT: ${{ needs.line-limit.result }}
+        run: |
+          test "${LINE_LIMIT_RESULT}" = success
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
