@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/labtether/labtether-linux/pkg/agentidentity"
+	"github.com/labtether/labtether-linux/pkg/assets"
 )
 
 func verifyHubTokenProof(t *testing.T, req enrollRequest, version, subject string) {
@@ -133,6 +134,20 @@ func TestLinuxReEnrollmentBypassesStaleTokenAndSignsCanonicalAsset(t *testing.T)
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/assets/heartbeat" {
+			if got := r.Header.Get("Authorization"); got != "Bearer replacement-agent-token" {
+				t.Errorf("recovery fallback sent stale token: %q", got)
+			}
+			var heartbeat assets.HeartbeatRequest
+			if err := json.NewDecoder(r.Body).Decode(&heartbeat); err != nil {
+				t.Error(err)
+			}
+			if heartbeat.AssetID != "qa-linux-1" {
+				t.Errorf("recovery fallback asset=%q", heartbeat.AssetID)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 		var req enrollRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Error(err)
@@ -143,7 +158,7 @@ func TestLinuxReEnrollmentBypassesStaleTokenAndSignsCanonicalAsset(t *testing.T)
 		verifyHubTokenProof(t, req, "v2", "qa-linux-1")
 		_ = json.NewEncoder(w).Encode(enrollResponse{
 			AgentToken: "replacement-agent-token", AssetID: "qa-linux-1",
-			HubWSURL: "ws://localhost/ws/agent", HubAPIURL: "http://localhost",
+			HubWSURL: "ws://" + r.Host + "/ws/agent", HubAPIURL: "http://" + r.Host,
 		})
 	}))
 	defer server.Close()
@@ -171,6 +186,10 @@ func TestLinuxReEnrollmentBypassesStaleTokenAndSignsCanonicalAsset(t *testing.T)
 	}
 	if transport.reEnrollFn != nil {
 		t.Fatal("consumed token left recovery callback armed")
+	}
+	publisher := newHeartbeatPublisher(cfg, nil, transport.identitySnapshot)
+	if err := publisher.Publish(context.Background(), TelemetrySample{AssetID: "old-hostname"}); err != nil {
+		t.Fatalf("HTTP fallback after signed re-enrollment: %v", err)
 	}
 }
 

@@ -18,20 +18,29 @@ func reEnrollAgainstActiveHub(ctx context.Context, cfg RuntimeConfig, transport 
 		return "", fmt.Errorf("re-enrollment token is unavailable")
 	}
 	assetID := canonicalEnrollmentAssetID(transport.AssetID())
-	if assetID == "" || strings.TrimSpace(transport.url) == "" {
+	current := transport.identitySnapshot()
+	if assetID == "" || strings.TrimSpace(current.wsBaseURL) == "" {
 		return "", fmt.Errorf("re-enrollment connection identity is unavailable")
 	}
 
 	cfgCopy := cfg
 	cfgCopy.APIToken = ""
-	cfgCopy.APIBaseURL = ""
-	cfgCopy.WSBaseURL = transport.url
+	cfgCopy.APIBaseURL = current.apiBaseURL
+	cfgCopy.WSBaseURL = current.wsBaseURL
 	resp, err := enrollWithHubWithIdentityProof(ctx, &cfgCopy, transport.deviceIdentity, assetID)
 	if err != nil {
 		return "", err
 	}
 	if resp.AssetID != assetID {
 		return "", fmt.Errorf("re-enrollment returned a different asset id")
+	}
+	nextAPI := resp.HubAPIURL
+	if resp.HubWSURL == "" && nextAPI == "" {
+		nextAPI = current.apiBaseURL
+	}
+	adopted, err := transport.adoptCredential(resp.AgentToken, resp.AssetID, resp.HubWSURL, nextAPI)
+	if err != nil {
+		return "", fmt.Errorf("invalid replacement credential: %w", err)
 	}
 	if err := saveTokenToFile(cfg.TokenFilePath, resp.AgentToken); err != nil {
 		log.Printf("agentws: replacement token is memory-only: %v", err)
@@ -41,7 +50,7 @@ func reEnrollAgainstActiveHub(ctx context.Context, cfg RuntimeConfig, transport 
 			}
 		}
 	} else if err := saveEnrollmentState(cfg.TokenFilePath, enrollmentState{
-		AssetID: resp.AssetID, HubWSURL: resp.HubWSURL, HubAPIURL: resp.HubAPIURL,
+		AssetID: adopted.assetID, HubWSURL: adopted.wsBaseURL, HubAPIURL: adopted.apiBaseURL,
 	}); err != nil {
 		log.Printf("agentws: could not persist re-enrollment state: %v", err)
 	}

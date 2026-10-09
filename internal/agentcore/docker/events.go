@@ -89,7 +89,7 @@ func (dc *DockerCollector) forwardEvent(ev DockerEvent) {
 	}
 
 	eventData := agentmgr.DockerEventData{
-		HostID: dc.assetID,
+		HostID: dc.currentAssetID(),
 		Type:   ev.Type,
 		Action: ev.Action,
 		Actor: agentmgr.DockerEventActor{

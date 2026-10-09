@@ -97,8 +97,6 @@ func Run(ctx context.Context, cfg RuntimeConfig, provider TelemetryProvider) err
 		staticMeta["agent_device_fingerprint"] = identity.Fingerprint
 		staticMeta["agent_device_key_alg"] = identity.KeyAlgorithm
 	}
-	httpPublisher := NewHeartbeatPublisher(cfg, staticMeta)
-
 	var publisher HeartbeatPublisher
 	var transport *wsTransport
 
@@ -109,6 +107,10 @@ func Run(ctx context.Context, cfg RuntimeConfig, provider TelemetryProvider) err
 		}
 
 		transport = newWSTransport(cfg.WSBaseURL, cfg.APIToken, cfg.AssetID, platform, cfg.Version, buildTLSConfig(&cfg), cfg.TokenFilePath, identity)
+		if cfg.APIBaseURL != "" {
+			transport.apiBaseURL = normalizeAPIBaseURL(cfg.APIBaseURL)
+		}
+		httpPublisher := newHeartbeatPublisher(cfg, staticMeta, transport.identitySnapshot)
 
 		// Set re-enrollment callback if enrollment token is configured.
 		if cfg.EnrollmentToken != "" {
@@ -238,7 +240,7 @@ func Run(ctx context.Context, cfg RuntimeConfig, provider TelemetryProvider) err
 		return runtime.Run(ctx)
 	}
 
-	publisher = httpPublisher
+	publisher = NewHeartbeatPublisher(cfg, staticMeta)
 	runtime := NewRuntime(cfg, provider, publisher)
 	runtime.deviceIdentity = identity
 	return runtime.Run(ctx)
@@ -256,6 +258,9 @@ func replayBufferedTelemetry(transport *wsTransport, telemetryBuf *RingBuffer[Te
 
 	log.Printf("agentws: replaying %d buffered telemetry samples", len(buffered))
 	for _, sample := range buffered {
+		if assetID := transport.AssetID(); assetID != "" {
+			sample.AssetID = assetID
+		}
 		sendTelemetrySample(transport, sample)
 	}
 }

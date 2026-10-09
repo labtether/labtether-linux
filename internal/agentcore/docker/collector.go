@@ -320,7 +320,7 @@ func (dc *DockerCollector) refreshAndPublishContainerDelta(ctx context.Context) 
 	}
 
 	delta := agentmgr.DockerDiscoveryDeltaData{
-		HostID:             dc.assetID,
+		HostID:             dc.currentAssetID(),
 		UpsertContainers:   upserts,
 		RemoveContainerIDs: removals,
 	}
@@ -398,7 +398,7 @@ func (dc *DockerCollector) currentRunningContainerIDs() []string {
 }
 
 func (dc *DockerCollector) collectFullDiscovery(ctx context.Context) (agentmgr.DockerDiscoveryData, dockerInventorySnapshot, map[string]struct{}, error) {
-	result := agentmgr.DockerDiscoveryData{HostID: dc.assetID}
+	result := agentmgr.DockerDiscoveryData{HostID: dc.currentAssetID()}
 	snapshot := dockerInventorySnapshot{
 		Containers: make(map[string]agentmgr.DockerContainerInfo),
 		Images:     make(map[string]agentmgr.DockerImageInfo),

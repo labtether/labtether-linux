@@ -44,7 +44,7 @@ func (wsc *WebServiceCollector) enrichFromProxies(containers []dockerpkg.DockerC
 		}
 		if len(result.routes) > 0 {
 			log.Printf("webservices: proxy/%s discovered %d routes", result.name, len(result.routes))
-			services = enrichServicesWithRoutes(services, result.routes, result.name, wsc.assetID, wsc.hostIP, containers)
+			services = enrichServicesWithRoutes(services, result.routes, result.name, wsc.currentAssetID(), wsc.hostIP, containers)
 		}
 	}
 

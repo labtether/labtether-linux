@@ -208,6 +208,11 @@ func (r *Runtime) collectOnce(now time.Time) {
 	// The Hub-issued asset ID is authoritative. Providers may have been created
 	// before enrollment restored or assigned that ID.
 	sample.AssetID = r.cfg.AssetID
+	if r.transport != nil {
+		if assetID := r.transport.AssetID(); assetID != "" {
+			sample.AssetID = assetID
+		}
+	}
 	if sample.CollectedAt.IsZero() {
 		sample.CollectedAt = now
 	}
@@ -238,8 +243,14 @@ func (r *Runtime) publishOnce(ctx context.Context) {
 
 func (r *Runtime) current() TelemetrySample {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.sample
+	sample := r.sample
+	r.mu.RUnlock()
+	if r.transport != nil {
+		if assetID := r.transport.AssetID(); assetID != "" {
+			sample.AssetID = assetID
+		}
+	}
+	return sample
 }
 
 func (r *Runtime) logCollectWarning(err error) {

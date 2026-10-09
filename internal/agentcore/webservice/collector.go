@@ -231,6 +231,13 @@ func (wsc *WebServiceCollector) RunCycle(ctx context.Context) {
 	if wsc.transport == nil || !wsc.transport.Connected() {
 		return
 	}
+	assetID := wsc.currentAssetID()
+	for _, service := range wsc.lastServices {
+		if service.HostAssetID != assetID {
+			wsc.lastServices = nil
+			break
+		}
+	}
 
 	cycleStartedAt := time.Now()
 	cfg := wsc.discoveryCfg
@@ -342,6 +349,12 @@ func (wsc *WebServiceCollector) RunCycle(ctx context.Context) {
 	}
 	normalizeLabTetherServices(services)
 	wsc.applyHealthChecksParallel(services, now)
+	if wsc.currentAssetID() != assetID {
+		// Approval changed the identity during discovery. The next cycle
+		// rebuilds all service IDs for the new canonical asset.
+		wsc.lastServices = nil
+		return
+	}
 
 	// Send report
 	discoveryStats := &agentmgr.WebServiceDiscoveryStats{
@@ -352,7 +365,7 @@ func (wsc *WebServiceCollector) RunCycle(ctx context.Context) {
 		FinalSourceCount: countDiscoveredServicesBySource(services),
 	}
 	report := agentmgr.WebServiceReportData{
-		HostAssetID: wsc.assetID,
+		HostAssetID: assetID,
 		Services:    services,
 		Discovery:   discoveryStats,
 	}
