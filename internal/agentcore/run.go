@@ -49,7 +49,7 @@ func Run(ctx context.Context, cfg RuntimeConfig, provider TelemetryProvider) err
 	}
 
 	// Resolve API token: explicit env → persisted file → enrollment
-	if err := ResolveToken(ctx, &cfg); err != nil {
+	if err := resolveTokenWithIdentity(ctx, &cfg, identity); err != nil {
 		log.Printf("%s: token resolution failed: %v", cfg.Name, err)
 	}
 
@@ -113,21 +113,7 @@ func Run(ctx context.Context, cfg RuntimeConfig, provider TelemetryProvider) err
 		// Set re-enrollment callback if enrollment token is configured.
 		if cfg.EnrollmentToken != "" {
 			transport.reEnrollFn = func() (string, error) {
-				cfgCopy := cfg
-				cfgCopy.APIToken = "" // force re-enrollment path
-				if err := ResolveToken(ctx, &cfgCopy); err != nil {
-					return "", err
-				}
-				if cfgCopy.APIToken == "" {
-					return "", fmt.Errorf("re-enrollment returned empty token")
-				}
-				// Persist the new token to disk for next startup.
-				if cfg.TokenFilePath != "" {
-					_ = saveTokenToFile(cfg.TokenFilePath, cfgCopy.APIToken)
-				}
-				// Note: transport.updateToken() is called by the reconnect loop
-				// after this returns; no need to mutate the outer cfg.
-				return cfgCopy.APIToken, nil
+				return reEnrollAgainstActiveHub(ctx, cfg, transport)
 			}
 		}
 

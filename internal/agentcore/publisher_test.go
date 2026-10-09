@@ -3,13 +3,38 @@ package agentcore
 import (
 	"context"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/labtether/labtether-linux/pkg/assets"
 	"github.com/labtether/labtether-linux/pkg/platforms"
 )
+
+func TestHeartbeatPublisherTrustsConfiguredCA(t *testing.T) {
+	t.Setenv("LABTETHER_OUTBOUND_ALLOW_LOOPBACK", "true")
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/assets/heartbeat" || r.Header.Get("Authorization") != "Bearer test-token" {
+			t.Errorf("unexpected heartbeat request: path=%q auth=%q", r.URL.Path, r.Header.Get("Authorization"))
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	caPath := filepath.Join(t.TempDir(), "hub-ca.pem")
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
+	if err := os.WriteFile(caPath, caPEM, 0600); err != nil {
+		t.Fatal(err)
+	}
+	publisher := NewHeartbeatPublisher(RuntimeConfig{
+		APIBaseURL: server.URL, APIToken: "test-token", TLSCAFile: caPath,
+	}, nil)
+	if err := publisher.Publish(context.Background(), TelemetrySample{AssetID: "qa-node"}); err != nil {
+		t.Fatalf("HTTPS heartbeat with configured CA: %v", err)
+	}
+}
 
 func TestResolveHeartbeatPlatform(t *testing.T) {
 	t.Parallel()

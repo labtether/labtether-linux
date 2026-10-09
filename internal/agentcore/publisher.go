@@ -22,9 +22,13 @@ func NewHeartbeatPublisher(cfg RuntimeConfig, staticMetadata map[string]string) 
 		log.Printf("%s heartbeat disabled: LABTETHER_API_BASE_URL/LABTETHER_API_TOKEN not configured", cfg.Name)
 		return noopHeartbeatPublisher{}
 	}
+	transport := &http.Transport{}
+	if tlsCfg := buildTLSConfig(&cfg); tlsCfg != nil {
+		transport.TLSClientConfig = tlsCfg
+	}
 
 	return &apiHeartbeatPublisher{
-		client: &http.Client{Timeout: 6 * time.Second},
+		client: &http.Client{Timeout: 6 * time.Second, Transport: transport},
 		cfg:    cfg,
 		meta:   cloneStringMap(staticMetadata),
 	}

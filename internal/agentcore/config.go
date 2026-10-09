@@ -105,15 +105,19 @@ func LoadConfig(defaultName, defaultPort, defaultSource string) RuntimeConfig {
 	logStreamEnabled := parseBoolEnv("LABTETHER_LOG_STREAM_ENABLED", logStreamEnabledDefault)
 
 	apiToken := strings.TrimSpace(envOrDefault("LABTETHER_API_TOKEN", ""))
+	apiTokenFromFile := false
 	if apiToken == "" {
 		if token, err := loadTokenFromFile(tokenFile); err == nil {
 			apiToken = strings.TrimSpace(token)
+			apiTokenFromFile = apiToken != ""
 		}
 	}
 	enrollmentToken := strings.TrimSpace(envOrDefault("LABTETHER_ENROLLMENT_TOKEN", ""))
+	enrollmentTokenFromFile := false
 	if enrollmentToken == "" {
 		if token, err := loadSecretFromFile(enrollmentTokenFile); err == nil {
 			enrollmentToken = strings.TrimSpace(token)
+			enrollmentTokenFromFile = enrollmentToken != ""
 		}
 	}
 	turnPass := strings.TrimSpace(envOrDefault("LABTETHER_WEBRTC_TURN_PASS", ""))
@@ -128,6 +132,7 @@ func LoadConfig(defaultName, defaultPort, defaultSource string) RuntimeConfig {
 		Port:                                 strings.TrimSpace(envOrDefault("AGENT_PORT", defaultPort)),
 		APIBaseURL:                           strings.TrimSpace(envOrDefault("LABTETHER_API_BASE_URL", "")),
 		APIToken:                             apiToken,
+		APITokenFromFile:                     apiTokenFromFile,
 		WSBaseURL:                            strings.TrimSpace(envOrDefault("LABTETHER_WS_URL", "")),
 		AssetID:                              assetID,
 		GroupID:                              strings.TrimSpace(envOrDefault("AGENT_GROUP_ID", "")),
@@ -139,6 +144,7 @@ func LoadConfig(defaultName, defaultPort, defaultSource string) RuntimeConfig {
 		LogStreamEnabled:                     logStreamEnabled,
 		EnrollmentToken:                      enrollmentToken,
 		EnrollmentTokenFilePath:              enrollmentTokenFile,
+		EnrollmentTokenFromFile:              enrollmentTokenFromFile,
 		TokenFilePath:                        tokenFile,
 		AgentSettingsPath:                    settingsFile,
 		DeviceKeyPath:                        deviceKeyFile,

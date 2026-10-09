@@ -205,9 +205,9 @@ func (r *Runtime) collectOnce(now time.Time) {
 	if err != nil {
 		r.logCollectWarning(err)
 	}
-	if sample.AssetID == "" {
-		sample.AssetID = r.cfg.AssetID
-	}
+	// The Hub-issued asset ID is authoritative. Providers may have been created
+	// before enrollment restored or assigned that ID.
+	sample.AssetID = r.cfg.AssetID
 	if sample.CollectedAt.IsZero() {
 		sample.CollectedAt = now
 	}

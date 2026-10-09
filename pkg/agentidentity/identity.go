@@ -3,6 +3,7 @@ package agentidentity
 import (
 	"crypto/sha256"
 	"encoding/base32"
+	"encoding/hex"
 	"strings"
 )
 
@@ -25,6 +26,26 @@ func BuildEnrollmentProofPayload(connectionID, nonce, fingerprint string) []byte
 			strings.TrimSpace(nonce) + "|" +
 			strings.TrimSpace(fingerprint),
 	)
+}
+
+// BuildTokenEnrollmentProofPayload signs the exact one-time token and hostname
+// without placing the raw bearer token in the signed payload.
+func BuildTokenEnrollmentProofPayload(hostname, enrollmentToken, fingerprint string) []byte {
+	tokenHash := sha256.Sum256([]byte(strings.TrimSpace(enrollmentToken)))
+	return []byte("labtether-token-enrollment-proof-v1|" +
+		strings.TrimSpace(hostname) + "|" +
+		hex.EncodeToString(tokenHash[:]) + "|" +
+		strings.TrimSpace(fingerprint))
+}
+
+// BuildTokenEnrollmentProofPayloadV2 binds recovery to the Hub's canonical
+// asset ID so a new token cannot reclaim a different device.
+func BuildTokenEnrollmentProofPayloadV2(assetID, enrollmentToken, fingerprint string) []byte {
+	tokenHash := sha256.Sum256([]byte(strings.TrimSpace(enrollmentToken)))
+	return []byte("labtether-token-enrollment-proof-v2|" +
+		strings.TrimSpace(assetID) + "|" +
+		hex.EncodeToString(tokenHash[:]) + "|" +
+		strings.TrimSpace(fingerprint))
 }
 
 func groupFingerprint(raw string, groupSize int) string {
