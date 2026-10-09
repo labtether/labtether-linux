@@ -40,7 +40,7 @@ func (t *wsTransport) setInitialGroup(groupID string, canonical bool) {
 
 // adoptCredential installs a Hub-issued credential and its routing identity
 // together, including the API origin used by HTTP fallback.
-func (t *wsTransport) adoptCredential(token, assetID, wsBaseURL, apiBaseURL string, canonicalGroupID ...*string) (transportIdentity, error) {
+func (t *wsTransport) adoptCredential(token, assetID, wsBaseURL, apiBaseURL string, canonicalGroupID *string) (transportIdentity, error) {
 	token = strings.TrimSpace(token)
 	assetID = strings.TrimSpace(assetID)
 	if err := validateIssuedAgentToken(token); err != nil {
@@ -69,8 +69,8 @@ func (t *wsTransport) adoptCredential(token, assetID, wsBaseURL, apiBaseURL stri
 		return transportIdentity{}, fmt.Errorf("enrollment hub origin is unavailable")
 	}
 	t.token, t.assetID = token, assetID
-	if len(canonicalGroupID) > 0 && canonicalGroupID[0] != nil {
-		t.groupID = strings.TrimSpace(*canonicalGroupID[0])
+	if canonicalGroupID != nil {
+		t.groupID = strings.TrimSpace(*canonicalGroupID)
 		t.groupKnown = true
 	}
 	t.url, t.apiBaseURL = wsBaseURL, apiBaseURL

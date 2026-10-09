@@ -108,7 +108,7 @@ func TestRotatedCredentialUpdatesHTTPFallbackWithoutRestart(t *testing.T) {
 	transport := newWSTransport("ws://old-hub.invalid/ws/agent", "revoked-token", "old-host", "linux", "test", nil, "", nil)
 	transport.apiBaseURL = "http://old-hub.invalid"
 	publisher := newHeartbeatPublisher(RuntimeConfig{}, nil, transport.identitySnapshot)
-	_, err := transport.adoptCredential("rotated-token", "canonical-asset", strings.Replace(server.URL, "http://", "ws://", 1)+"/ws/agent", server.URL)
+	_, err := transport.adoptCredential("rotated-token", "canonical-asset", strings.Replace(server.URL, "http://", "ws://", 1)+"/ws/agent", server.URL, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
