@@ -25,6 +25,7 @@ func reEnrollAgainstActiveHub(ctx context.Context, cfg RuntimeConfig, transport 
 
 	cfgCopy := cfg
 	cfgCopy.APIToken = ""
+	cfgCopy.GroupID = current.groupID
 	cfgCopy.APIBaseURL = current.apiBaseURL
 	cfgCopy.WSBaseURL = current.wsBaseURL
 	resp, err := enrollWithHubWithIdentityProof(ctx, &cfgCopy, transport.deviceIdentity, assetID)
@@ -38,7 +39,7 @@ func reEnrollAgainstActiveHub(ctx context.Context, cfg RuntimeConfig, transport 
 	if resp.HubWSURL == "" && nextAPI == "" {
 		nextAPI = current.apiBaseURL
 	}
-	adopted, err := transport.adoptCredential(resp.AgentToken, resp.AssetID, resp.HubWSURL, nextAPI)
+	adopted, err := transport.adoptCredential(resp.AgentToken, resp.AssetID, resp.HubWSURL, nextAPI, resp.GroupID)
 	if err != nil {
 		return "", fmt.Errorf("invalid replacement credential: %w", err)
 	}
@@ -50,7 +51,8 @@ func reEnrollAgainstActiveHub(ctx context.Context, cfg RuntimeConfig, transport 
 			}
 		}
 	} else if err := saveEnrollmentState(cfg.TokenFilePath, enrollmentState{
-		AssetID: adopted.assetID, HubWSURL: adopted.wsBaseURL, HubAPIURL: adopted.apiBaseURL,
+		AssetID: adopted.assetID, GroupID: canonicalGroupIDPointer(adopted.groupID, adopted.groupKnown),
+		HubWSURL: adopted.wsBaseURL, HubAPIURL: adopted.apiBaseURL,
 	}); err != nil {
 		log.Printf("agentws: could not persist re-enrollment state: %v", err)
 	}

@@ -5,7 +5,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
@@ -301,32 +300,32 @@ func TestEnrollWithHub_TLSWithCA(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// Get the test server's CA certificate and create a custom transport
-	// We'll test that TLSSkipVerify works alongside CA, since httptest certs
-	// won't validate against a random CA file anyway
+	caPath := filepath.Join(t.TempDir(), "hub-ca.crt")
+	serverCert := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
+	if err := os.WriteFile(caPath, serverCert, 0600); err != nil {
+		t.Fatal(err)
+	}
 	cfg := &RuntimeConfig{
 		EnrollmentToken: "ca-enroll-token",
 		APIBaseURL:      server.URL,
+		TLSCAFile:       caPath,
 		TLSSkipVerify:   true,
 	}
-
-	// Manually build a client with the test server's cert pool to prove CA flow works
-	client := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				MinVersion: tls.VersionTLS12,
-				RootCAs:    server.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs,
-			},
-		},
-	}
-	_ = client // Demonstrates the pattern; actual test uses skip-verify
-
 	resp, err := enrollWithHub(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if resp.AgentToken != "ca-agent-token" {
 		t.Fatalf("expected 'ca-agent-token', got %q", resp.AgentToken)
+	}
+	if buildTLSConfig(cfg).InsecureSkipVerify {
+		t.Fatal("configured CA must keep TLS verification enabled")
+	}
+	if err := os.WriteFile(caPath, []byte(testCACertPEM(t)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := enrollWithHub(context.Background(), cfg); err == nil {
+		t.Fatal("wrong CA was accepted with skip-verify also configured")
 	}
 }
 

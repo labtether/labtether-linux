@@ -22,7 +22,7 @@ func buildTLSConfig(cfg *RuntimeConfig) *tls.Config {
 	tlsCfg := &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		// #nosec G402 -- operator opt-in for local/dev self-signed deployments.
-		InsecureSkipVerify: cfg.TLSSkipVerify, //nolint:gosec // #nosec G402 -- operator opt-in for dev/self-signed
+		InsecureSkipVerify: cfg.TLSSkipVerify && cfg.TLSCAFile == "", //nolint:gosec // #nosec G402 -- operator opt-in for dev/self-signed
 	}
 
 	if cfg.TLSCAFile != "" {

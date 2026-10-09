@@ -73,10 +73,21 @@ func (r *Runtime) statusHandler() http.HandlerFunc {
 			uptime = time.Since(r.startedAt).Truncate(time.Second).String()
 		}
 
+		assetID, groupID := r.cfg.AssetID, r.cfg.GroupID
+		if r.transport != nil {
+			identity := r.transport.identitySnapshot()
+			if identity.assetID != "" {
+				assetID = identity.assetID
+			}
+			if identity.groupKnown || identity.groupID != "" {
+				groupID = identity.groupID
+			}
+		}
+		sample.AssetID = assetID
 		resp := StatusResponse{
 			AgentName:         r.cfg.Name,
-			AssetID:           r.cfg.AssetID,
-			GroupID:           r.cfg.GroupID,
+			AssetID:           assetID,
+			GroupID:           groupID,
 			Port:              r.cfg.Port,
 			Connected:         connected,
 			ConnectionState:   connState,

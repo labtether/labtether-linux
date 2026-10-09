@@ -53,6 +53,10 @@ func Run(ctx context.Context, cfg RuntimeConfig, provider TelemetryProvider) err
 		log.Printf("%s: token resolution failed: %v", cfg.Name, err)
 	}
 
+	if cfg.TLSSkipVerify && strings.TrimSpace(cfg.TLSCAFile) != "" {
+		log.Printf("%s: configured TLS CA takes priority; ignoring LABTETHER_TLS_SKIP_VERIFY", cfg.Name)
+		cfg.TLSSkipVerify = false
+	}
 	if cfg.TLSSkipVerify {
 		log.Printf("%s: WARNING: TLS certificate verification is disabled (LABTETHER_TLS_SKIP_VERIFY=true). This is insecure and should only be used for initial setup. Configure LABTETHER_TLS_CA_FILE to trust the hub CA.", cfg.Name)
 	}
@@ -107,6 +111,7 @@ func Run(ctx context.Context, cfg RuntimeConfig, provider TelemetryProvider) err
 		}
 
 		transport = newWSTransport(cfg.WSBaseURL, cfg.APIToken, cfg.AssetID, platform, cfg.Version, buildTLSConfig(&cfg), cfg.TokenFilePath, identity)
+		transport.setInitialGroup(cfg.GroupID, cfg.groupIDCanonical)
 		if cfg.APIBaseURL != "" {
 			transport.apiBaseURL = normalizeAPIBaseURL(cfg.APIBaseURL)
 		}
