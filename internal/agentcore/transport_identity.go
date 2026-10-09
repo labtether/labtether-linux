@@ -10,6 +10,8 @@ import (
 type transportIdentity struct {
 	token      string
 	assetID    string
+	groupID    string
+	groupKnown bool
 	wsBaseURL  string
 	apiBaseURL string
 	generation uint64
@@ -24,13 +26,21 @@ func (t *wsTransport) identitySnapshot() transportIdentity {
 	}
 	return transportIdentity{
 		token: t.token, assetID: t.assetID, wsBaseURL: t.url,
+		groupID: t.groupID, groupKnown: t.groupKnown,
 		apiBaseURL: apiBaseURL, generation: t.identityGeneration,
 	}
 }
 
+func (t *wsTransport) setInitialGroup(groupID string, canonical bool) {
+	t.mu.Lock()
+	t.groupID = strings.TrimSpace(groupID)
+	t.groupKnown = canonical
+	t.mu.Unlock()
+}
+
 // adoptCredential installs a Hub-issued credential and its routing identity
 // together, including the API origin used by HTTP fallback.
-func (t *wsTransport) adoptCredential(token, assetID, wsBaseURL, apiBaseURL string) (transportIdentity, error) {
+func (t *wsTransport) adoptCredential(token, assetID, wsBaseURL, apiBaseURL string, canonicalGroupID *string) (transportIdentity, error) {
 	token = strings.TrimSpace(token)
 	assetID = strings.TrimSpace(assetID)
 	if err := validateIssuedAgentToken(token); err != nil {
@@ -59,12 +69,17 @@ func (t *wsTransport) adoptCredential(token, assetID, wsBaseURL, apiBaseURL stri
 		return transportIdentity{}, fmt.Errorf("enrollment hub origin is unavailable")
 	}
 	t.token, t.assetID = token, assetID
+	if canonicalGroupID != nil {
+		t.groupID = strings.TrimSpace(*canonicalGroupID)
+		t.groupKnown = true
+	}
 	t.url, t.apiBaseURL = wsBaseURL, apiBaseURL
 	t.identityGeneration++
 	t.consecutiveAuthFailures = 0
 	t.lastError = ""
 	result := transportIdentity{
 		token: token, assetID: assetID, wsBaseURL: wsBaseURL,
+		groupID: t.groupID, groupKnown: t.groupKnown,
 		apiBaseURL: apiBaseURL, generation: t.identityGeneration,
 	}
 	return result, nil

@@ -48,7 +48,7 @@ type apiHeartbeatPublisher struct {
 
 func (p *apiHeartbeatPublisher) Publish(ctx context.Context, sample TelemetrySample) error {
 	identity := transportIdentity{
-		token: p.cfg.APIToken, assetID: sample.AssetID,
+		token: p.cfg.APIToken, assetID: sample.AssetID, groupID: p.cfg.GroupID,
 		apiBaseURL: p.cfg.APIBaseURL,
 	}
 	if p.identitySource != nil {
@@ -56,6 +56,10 @@ func (p *apiHeartbeatPublisher) Publish(ctx context.Context, sample TelemetrySam
 	}
 	if identity.token == "" || identity.apiBaseURL == "" || identity.assetID == "" {
 		return fmt.Errorf("heartbeat credentials or hub origin unavailable")
+	}
+	groupID := identity.groupID
+	if groupID == "" && !identity.groupKnown {
+		groupID = p.cfg.GroupID
 	}
 	metadata := cloneStringMap(p.meta)
 	metadata[metricschema.HeartbeatKeyCPUPercent] = fmt.Sprintf("%.2f", sample.CPUPercent)
@@ -80,7 +84,7 @@ func (p *apiHeartbeatPublisher) Publish(ctx context.Context, sample TelemetrySam
 		Type:     "host",
 		Name:     identity.assetID,
 		Source:   p.cfg.Source,
-		GroupID:  p.cfg.GroupID,
+		GroupID:  groupID,
 		Status:   "online",
 		Platform: resolvedPlatform,
 		Metadata: metadata,

@@ -139,7 +139,7 @@ func TestBuildTLSConfig_CAFileAndSkipVerify(t *testing.T) {
 	if tlsCfg == nil {
 		t.Fatalf("expected non-nil TLS config")
 	}
-	if !tlsCfg.InsecureSkipVerify {
-		t.Fatalf("expected InsecureSkipVerify=true")
+	if tlsCfg.InsecureSkipVerify {
+		t.Fatalf("configured CA must force certificate verification, even when the file is missing")
 	}
 }

@@ -93,6 +93,8 @@ type wsTransport struct {
 	apiBaseURL         string
 	token              string
 	assetID            string
+	groupID            string
+	groupKnown         bool
 	identityGeneration uint64
 	platform           string
 	agentVersion       string

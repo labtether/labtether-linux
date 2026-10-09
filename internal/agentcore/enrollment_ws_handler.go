@@ -85,7 +85,8 @@ func handleEnrollmentApproved(transport *wsTransport, msg agentmgr.Message, cfg 
 
 	log.Printf("agentws: enrollment APPROVED! asset_id=%s", data.AssetID)
 	current := transport.identitySnapshot()
-	adopted, err := transport.adoptCredential(data.Token, data.AssetID, current.wsBaseURL, current.apiBaseURL)
+	unplacedGroupID := ""
+	adopted, err := transport.adoptCredential(data.Token, data.AssetID, current.wsBaseURL, current.apiBaseURL, &unplacedGroupID)
 	if err != nil {
 		log.Printf("agentws: enrollment.approved identity update failed: %v", err)
 		return
@@ -104,7 +105,8 @@ func handleEnrollmentApproved(transport *wsTransport, msg agentmgr.Message, cfg 
 		} else {
 			log.Printf("agentws: token saved to %s", cfg.TokenFilePath)
 			if err := saveEnrollmentState(cfg.TokenFilePath, enrollmentState{
-				AssetID: adopted.assetID, HubWSURL: adopted.wsBaseURL, HubAPIURL: adopted.apiBaseURL,
+				AssetID: adopted.assetID, GroupID: canonicalGroupIDPointer(adopted.groupID, adopted.groupKnown),
+				HubWSURL: adopted.wsBaseURL, HubAPIURL: adopted.apiBaseURL,
 			}); err != nil {
 				log.Printf("agentws: warning: failed to save enrollment state: %v", err)
 			}

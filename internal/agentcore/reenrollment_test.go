@@ -142,8 +142,8 @@ func TestLinuxReEnrollmentBypassesStaleTokenAndSignsCanonicalAsset(t *testing.T)
 			if err := json.NewDecoder(r.Body).Decode(&heartbeat); err != nil {
 				t.Error(err)
 			}
-			if heartbeat.AssetID != "qa-linux-1" {
-				t.Errorf("recovery fallback asset=%q", heartbeat.AssetID)
+			if heartbeat.AssetID != "qa-linux-1" || heartbeat.GroupID != "server-group" {
+				t.Errorf("recovery fallback identity: asset=%q group=%q", heartbeat.AssetID, heartbeat.GroupID)
 			}
 			w.WriteHeader(http.StatusAccepted)
 			return
@@ -156,8 +156,10 @@ func TestLinuxReEnrollmentBypassesStaleTokenAndSignsCanonicalAsset(t *testing.T)
 			t.Errorf("recovery hostname=%q", req.Hostname)
 		}
 		verifyHubTokenProof(t, req, "v2", "qa-linux-1")
+		serverGroup := "server-group"
 		_ = json.NewEncoder(w).Encode(enrollResponse{
 			AgentToken: "replacement-agent-token", AssetID: "qa-linux-1",
+			GroupID:  &serverGroup,
 			HubWSURL: "ws://" + r.Host + "/ws/agent", HubAPIURL: "http://" + r.Host,
 		})
 	}))
@@ -165,6 +167,7 @@ func TestLinuxReEnrollmentBypassesStaleTokenAndSignsCanonicalAsset(t *testing.T)
 	cfg.APIBaseURL = "http://old-hub.invalid"
 	transport := newWSTransport(strings.Replace(server.URL, "http://", "ws://", 1)+"/ws/agent",
 		"rejected-agent-token", "qa-linux-1", "linux", "test", nil, cfg.TokenFilePath, identity)
+	transport.setInitialGroup("stale-group", false)
 	transport.reEnrollFn = func() (string, error) { return "", nil }
 	issued, err := reEnrollAgainstActiveHub(context.Background(), cfg, transport)
 	if err != nil || issued != "replacement-agent-token" {
@@ -186,6 +189,10 @@ func TestLinuxReEnrollmentBypassesStaleTokenAndSignsCanonicalAsset(t *testing.T)
 	}
 	if transport.reEnrollFn != nil {
 		t.Fatal("consumed token left recovery callback armed")
+	}
+	stateCfg := RuntimeConfig{TokenFilePath: cfg.TokenFilePath, GroupID: "restart-group"}
+	if err := restoreEnrollmentState(&stateCfg); err != nil || stateCfg.GroupID != "server-group" {
+		t.Fatalf("replacement group not restored: group=%q err=%v", stateCfg.GroupID, err)
 	}
 	publisher := newHeartbeatPublisher(cfg, nil, transport.identitySnapshot)
 	if err := publisher.Publish(context.Background(), TelemetrySample{AssetID: "old-hostname"}); err != nil {

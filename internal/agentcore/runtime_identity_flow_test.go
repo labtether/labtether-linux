@@ -35,12 +35,13 @@ func TestPendingApprovalActivatesCanonicalIdentityAndHTTPFallback(t *testing.T) 
 	wsURL := strings.Replace(server.URL, "http://", "ws://", 1) + "/ws/agent"
 	tokenFile := filepath.Join(t.TempDir(), "agent-token")
 	transport := newWSTransport(wsURL, "", "local-hostname", "linux", "test", nil, tokenFile, nil)
-	publisher := newHeartbeatPublisher(RuntimeConfig{}, nil, transport.identitySnapshot)
+	transport.setInitialGroup("requested-group", false)
+	publisher := newHeartbeatPublisher(RuntimeConfig{GroupID: "requested-group"}, nil, transport.identitySnapshot)
 	if err := publisher.Publish(context.Background(), TelemetrySample{AssetID: "local-hostname"}); err == nil {
 		t.Fatal("tokenless pending agent sent an HTTP heartbeat")
 	}
 
-	runtime := NewRuntime(RuntimeConfig{AssetID: "local-hostname"},
+	runtime := NewRuntime(RuntimeConfig{AssetID: "local-hostname", GroupID: "requested-group"},
 		stubProvider{sample: TelemetrySample{AssetID: "local-hostname"}}, publisher)
 	runtime.transport = transport
 	approved, err := json.Marshal(agentmgr.EnrollmentApprovedData{Token: "approved-token", AssetID: "canonical-asset"})
@@ -60,15 +61,22 @@ func TestPendingApprovalActivatesCanonicalIdentityAndHTTPFallback(t *testing.T) 
 	}
 	select {
 	case body := <-requests:
-		if body.AssetID != "canonical-asset" || body.Name != "canonical-asset" {
+		if body.AssetID != "canonical-asset" || body.Name != "canonical-asset" || body.GroupID != "" {
 			t.Fatalf("heartbeat used stale asset: %+v", body)
 		}
 	default:
 		t.Fatal("approved heartbeat was not sent")
 	}
 	stateCfg := RuntimeConfig{TokenFilePath: tokenFile}
-	if err := restoreEnrollmentState(&stateCfg); err != nil || stateCfg.AssetID != "canonical-asset" || stateCfg.APIBaseURL != server.URL {
+	stateCfg.GroupID = "stale-group"
+	if err := restoreEnrollmentState(&stateCfg); err != nil || stateCfg.AssetID != "canonical-asset" || stateCfg.APIBaseURL != server.URL || stateCfg.GroupID != "" {
 		t.Fatalf("approved identity not persisted: asset=%q api=%q err=%v", stateCfg.AssetID, stateCfg.APIBaseURL, err)
+	}
+	status := httptest.NewRecorder()
+	runtime.statusHandler()(status, httptest.NewRequest(http.MethodGet, "/agent/status", nil))
+	var local StatusResponse
+	if err := json.Unmarshal(status.Body.Bytes(), &local); err != nil || local.GroupID != "" || local.AssetID != "canonical-asset" {
+		t.Fatalf("approved local status identity: asset=%q group=%q err=%v", local.AssetID, local.GroupID, err)
 	}
 	for _, path := range []string{tokenFile, enrollmentStatePath(tokenFile)} {
 		info, err := os.Stat(path)
@@ -100,7 +108,7 @@ func TestRotatedCredentialUpdatesHTTPFallbackWithoutRestart(t *testing.T) {
 	transport := newWSTransport("ws://old-hub.invalid/ws/agent", "revoked-token", "old-host", "linux", "test", nil, "", nil)
 	transport.apiBaseURL = "http://old-hub.invalid"
 	publisher := newHeartbeatPublisher(RuntimeConfig{}, nil, transport.identitySnapshot)
-	_, err := transport.adoptCredential("rotated-token", "canonical-asset", strings.Replace(server.URL, "http://", "ws://", 1)+"/ws/agent", server.URL)
+	_, err := transport.adoptCredential("rotated-token", "canonical-asset", strings.Replace(server.URL, "http://", "ws://", 1)+"/ws/agent", server.URL, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
