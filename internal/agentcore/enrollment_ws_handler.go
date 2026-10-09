@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"log"
+	"os"
 	"strings"
 
 	"github.com/labtether/labtether-linux/pkg/agentidentity"
@@ -75,32 +76,41 @@ func handleEnrollmentApproved(transport *wsTransport, msg agentmgr.Message, cfg 
 		log.Printf("agentws: invalid enrollment.approved payload: %v", err)
 		return
 	}
-	if data.Token == "" {
-		log.Printf("agentws: enrollment.approved received but token is empty \u2014 ignoring")
+	data.Token = strings.TrimSpace(data.Token)
+	data.AssetID = strings.TrimSpace(data.AssetID)
+	if err := validateIssuedAgentToken(data.Token); err != nil || !validEnrollmentAssetID(data.AssetID) {
+		log.Printf("agentws: enrollment.approved received invalid credential or canonical asset id")
 		return
 	}
 
 	log.Printf("agentws: enrollment APPROVED! asset_id=%s", data.AssetID)
+	current := transport.identitySnapshot()
+	adopted, err := transport.adoptCredential(data.Token, data.AssetID, current.wsBaseURL, current.apiBaseURL)
+	if err != nil {
+		log.Printf("agentws: enrollment.approved identity update failed: %v", err)
+		return
+	}
+	// Close the unauthenticated socket before any heartbeat can use the new ID.
+	// The reconnect loop uses the approved identity already held in memory.
+	transport.markDisconnected()
 
 	// Persist token to disk so it survives restarts.
 	if cfg.TokenFilePath != "" {
 		if err := saveTokenToFile(cfg.TokenFilePath, data.Token); err != nil {
-			log.Printf("agentws: warning: failed to save enrollment token: %v", err)
+			log.Printf("agentws: approved token is memory-only: %v", err)
+			if removeErr := os.Remove(cfg.TokenFilePath); removeErr != nil && !os.IsNotExist(removeErr) {
+				log.Printf("agentws: warning: could not remove stale token: %v", removeErr)
+			}
 		} else {
 			log.Printf("agentws: token saved to %s", cfg.TokenFilePath)
+			if err := saveEnrollmentState(cfg.TokenFilePath, enrollmentState{
+				AssetID: adopted.assetID, HubWSURL: adopted.wsBaseURL, HubAPIURL: adopted.apiBaseURL,
+			}); err != nil {
+				log.Printf("agentws: warning: failed to save enrollment state: %v", err)
+			}
 		}
 	}
 
-	// Update transport credentials before disconnecting so the next dial uses the token.
-	transport.updateToken(data.Token)
-	if data.AssetID != "" {
-		transport.mu.Lock()
-		transport.assetID = data.AssetID
-		transport.mu.Unlock()
-	}
-
-	// Close current connection - the reconnect loop will re-dial using the new token.
-	transport.markDisconnected()
 }
 
 // handleEnrollmentRejected processes an enrollment.rejected message from the hub.

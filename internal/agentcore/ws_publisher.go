@@ -71,10 +71,14 @@ func (p *wsHeartbeatPublisher) Publish(ctx context.Context, sample TelemetrySamp
 		metadata["platform"] = resolvedPlatform
 	}
 
+	assetID := p.transport.AssetID()
+	if assetID == "" {
+		assetID = sample.AssetID
+	}
 	heartbeat := agentmgr.HeartbeatData{
-		AssetID:      sample.AssetID,
+		AssetID:      assetID,
 		Type:         "host",
-		Name:         sample.AssetID,
+		Name:         assetID,
 		Source:       p.cfg.Source,
 		GroupID:      p.cfg.GroupID,
 		Status:       "online",

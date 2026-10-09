@@ -137,7 +137,7 @@ func (dc *DockerCollector) collectAndSendStats(ctx context.Context) {
 		return
 	}
 
-	payload := agentmgr.DockerStatsData{HostID: dc.assetID, Containers: payloadStats}
+	payload := agentmgr.DockerStatsData{HostID: dc.currentAssetID(), Containers: payloadStats}
 	if err := dc.sendDockerMessage(agentmgr.MsgDockerStats, payload); err != nil {
 		log.Printf("docker: failed to send stats: %v", err)
 		return

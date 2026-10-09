@@ -89,14 +89,16 @@ const (
 )
 
 type wsTransport struct {
-	url            string
-	token          string
-	assetID        string
-	platform       string
-	agentVersion   string
-	tlsConfig      *tls.Config
-	tokenFilePath  string
-	deviceIdentity *deviceIdentity
+	url                string
+	apiBaseURL         string
+	token              string
+	assetID            string
+	identityGeneration uint64
+	platform           string
+	agentVersion       string
+	tlsConfig          *tls.Config
+	tokenFilePath      string
+	deviceIdentity     *deviceIdentity
 
 	// Diagnostic counters — accessed with sync/atomic.
 	messagesSent     int64
@@ -127,8 +129,15 @@ type wsTransport struct {
 
 // updateToken updates the bearer token and resets auth failure state.
 func (t *wsTransport) updateToken(token string) {
+	if err := validateIssuedAgentToken(strings.TrimSpace(token)); err != nil {
+		log.Printf("agentws: rejected invalid replacement credential: %v", err)
+		return
+	}
 	t.mu.Lock()
-	t.token = token
+	if t.token != strings.TrimSpace(token) {
+		t.token = strings.TrimSpace(token)
+		t.identityGeneration++
+	}
 	t.consecutiveAuthFailures = 0
 	t.lastError = ""
 	t.mu.Unlock()
@@ -136,25 +145,25 @@ func (t *wsTransport) updateToken(token string) {
 
 // AssetID returns the asset ID associated with this transport.
 func (t *wsTransport) AssetID() string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.assetID
+	return t.identitySnapshot().assetID
 }
 
 func newWSTransport(url, token, assetID, platform, agentVersion string, tlsConfig *tls.Config, tokenFilePath string, identity *deviceIdentity) *wsTransport {
 	return &wsTransport{
-		url:            normalizeWSBaseURL(url),
-		token:          token,
-		assetID:        assetID,
-		platform:       platform,
-		agentVersion:   strings.TrimSpace(agentVersion),
-		tlsConfig:      tlsConfig,
-		tokenFilePath:  tokenFilePath,
-		deviceIdentity: identity,
-		startedAt:      time.Now(),
-		timeAfter:      time.After,
-		now:            time.Now,
-		jitter:         jitterDuration,
+		url:                normalizeWSBaseURL(url),
+		apiBaseURL:         apiBaseURLFromWS(url),
+		token:              token,
+		assetID:            assetID,
+		identityGeneration: 1,
+		platform:           platform,
+		agentVersion:       strings.TrimSpace(agentVersion),
+		tlsConfig:          tlsConfig,
+		tokenFilePath:      tokenFilePath,
+		deviceIdentity:     identity,
+		startedAt:          time.Now(),
+		timeAfter:          time.After,
+		now:                time.Now,
+		jitter:             jitterDuration,
 	}
 }
 
@@ -189,12 +198,11 @@ func (t *wsTransport) jitterDuration(max time.Duration) time.Duration {
 // connectWithResponse dials the hub and returns the HTTP response alongside the
 // error so callers can inspect the status code for error classification.
 func (t *wsTransport) connectWithResponse(ctx context.Context) (*http.Response, error) {
-	if err := validateWebSocketTransportURL(t.url); err != nil {
+	identity := t.identitySnapshot()
+	if err := validateWebSocketTransportURL(identity.wsBaseURL); err != nil {
 		return nil, err
 	}
-	t.mu.Lock()
-	token := t.token
-	t.mu.Unlock()
+	token := identity.token
 
 	header := http.Header{}
 	if token != "" {
@@ -209,7 +217,7 @@ func (t *wsTransport) connectWithResponse(ctx context.Context) (*http.Response, 
 			header.Set("X-Device-Public-Key", t.deviceIdentity.PublicKeyBase64)
 		}
 	}
-	header.Set("X-Asset-ID", t.assetID)
+	header.Set("X-Asset-ID", identity.assetID)
 	header.Set("X-Platform", t.platform)
 	if t.agentVersion != "" {
 		header.Set("X-Agent-Version", t.agentVersion)
@@ -220,7 +228,7 @@ func (t *wsTransport) connectWithResponse(ctx context.Context) (*http.Response, 
 		TLSClientConfig:  t.tlsConfig,
 	}
 
-	conn, resp, err := dialer.DialContext(ctx, t.url, header)
+	conn, resp, err := dialer.DialContext(ctx, identity.wsBaseURL, header)
 	if err != nil {
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
@@ -235,6 +243,11 @@ func (t *wsTransport) connectWithResponse(ctx context.Context) (*http.Response, 
 	})
 
 	t.mu.Lock()
+	if t.identityGeneration != identity.generation {
+		t.mu.Unlock()
+		_ = conn.Close()
+		return resp, fmt.Errorf("agent credential changed during websocket handshake")
+	}
 	if t.conn != nil {
 		_ = t.conn.Close()
 	}
@@ -253,7 +266,7 @@ func (t *wsTransport) connectWithResponse(ctx context.Context) (*http.Response, 
 
 	go t.pingLoop(conn, pingDone)
 
-	log.Printf("agentws: connected to %s", t.url)
+	log.Printf("agentws: connected to %s", identity.wsBaseURL)
 	return resp, nil
 }
 

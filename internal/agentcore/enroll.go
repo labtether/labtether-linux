@@ -3,7 +3,9 @@ package agentcore
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -16,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/labtether/labtether-linux/pkg/agentidentity"
 	"github.com/labtether/labtether-linux/pkg/securityruntime"
 )
 
@@ -24,8 +27,20 @@ import (
 // 2. Persisted token file on disk
 // 3. Enrollment with the hub using LABTETHER_ENROLLMENT_TOKEN
 func ResolveToken(ctx context.Context, cfg *RuntimeConfig) error {
+	return resolveTokenWithIdentity(ctx, cfg, nil)
+}
+
+func resolveTokenWithIdentity(ctx context.Context, cfg *RuntimeConfig, identity *deviceIdentity) error {
 	// Priority 1: explicit API token
 	if cfg.APIToken != "" {
+		if cfg.APITokenFromFile {
+			if err := restoreEnrollmentState(cfg); err != nil {
+				log.Printf("agent: warning: could not restore enrollment state: %v", err)
+			}
+		}
+		if cfg.APIBaseURL == "" {
+			cfg.APIBaseURL = apiBaseURLFromWS(cfg.WSBaseURL)
+		}
 		return nil
 	}
 
@@ -33,6 +48,13 @@ func ResolveToken(ctx context.Context, cfg *RuntimeConfig) error {
 	if token, err := loadTokenFromFile(cfg.TokenFilePath); err == nil && token != "" {
 		log.Printf("agent: loaded token from %s", cfg.TokenFilePath)
 		cfg.APIToken = token
+		cfg.APITokenFromFile = true
+		if err := restoreEnrollmentState(cfg); err != nil {
+			log.Printf("agent: warning: could not restore enrollment state: %v", err)
+		}
+		if cfg.APIBaseURL == "" {
+			cfg.APIBaseURL = apiBaseURLFromWS(cfg.WSBaseURL)
+		}
 		return nil
 	}
 
@@ -45,7 +67,7 @@ func ResolveToken(ctx context.Context, cfg *RuntimeConfig) error {
 	}
 
 	log.Printf("agent: enrolling with hub...")
-	resp, err := enrollWithHub(ctx, cfg)
+	resp, err := enrollWithHubWithIdentityProof(ctx, cfg, identity, "")
 	if err != nil {
 		return fmt.Errorf("enrollment failed: %w", err)
 	}
@@ -64,16 +86,28 @@ func ResolveToken(ctx context.Context, cfg *RuntimeConfig) error {
 	// Persist token to disk
 	if err := saveTokenToFile(cfg.TokenFilePath, resp.AgentToken); err != nil {
 		log.Printf("agent: warning: could not persist token to %s: %v", cfg.TokenFilePath, err)
+		if cfg.TokenFilePath != "" {
+			if removeErr := os.Remove(cfg.TokenFilePath); removeErr != nil && !os.IsNotExist(removeErr) {
+				log.Printf("agent: warning: could not remove stale token: %v", removeErr)
+			}
+		}
 	} else {
 		log.Printf("agent: token persisted to %s", cfg.TokenFilePath)
+		if err := saveEnrollmentState(cfg.TokenFilePath, enrollmentState{
+			AssetID: cfg.AssetID, HubWSURL: cfg.WSBaseURL, HubAPIURL: cfg.APIBaseURL,
+		}); err != nil {
+			log.Printf("agent: warning: could not persist enrollment state: %v", err)
+		}
 	}
 
-	// Save hub CA certificate if provided (validate it's actually a CA cert first).
-	if resp.CACertPEM != "" && cfg.TokenFilePath != "" {
+	// Preserve an operator-supplied CA for a TLS proxy in front of the Hub.
+	// The Hub's returned internal CA may not trust that public endpoint.
+	caPath := filepath.Join(filepath.Dir(cfg.TokenFilePath), "ca.crt")
+	if resp.CACertPEM != "" && cfg.TokenFilePath != "" &&
+		(cfg.TLSCAFile == "" || filepath.Clean(cfg.TLSCAFile) == filepath.Clean(caPath)) {
 		if err := validateCACertPEM(resp.CACertPEM); err != nil {
 			log.Printf("agent: warning: hub returned invalid CA certificate: %v (ignoring)", err)
 		} else {
-			caPath := filepath.Join(filepath.Dir(cfg.TokenFilePath), "ca.crt")
 			if err := os.WriteFile(caPath, []byte(resp.CACertPEM), 0644); err != nil { // #nosec G306 -- CA certificate is public trust material, not a private secret.
 				log.Printf("agent: warning: could not save hub CA to %s: %v", caPath, err)
 			} else {
@@ -84,14 +118,19 @@ func ResolveToken(ctx context.Context, cfg *RuntimeConfig) error {
 	}
 
 	log.Printf("agent: enrolled successfully as %s", cfg.AssetID)
-	return nil
+	return discardConsumedEnrollmentToken(cfg)
 }
 
 type enrollRequest struct {
-	EnrollmentToken string `json:"enrollment_token"`
-	Hostname        string `json:"hostname"`
-	Platform        string `json:"platform"`
-	GroupID         string `json:"group_id,omitempty"`
+	EnrollmentToken    string `json:"enrollment_token"`
+	Hostname           string `json:"hostname"`
+	Platform           string `json:"platform"`
+	GroupID            string `json:"group_id,omitempty"`
+	DeviceKeyAlg       string `json:"device_key_algorithm,omitempty"`
+	DevicePublicKey    string `json:"device_public_key,omitempty"`
+	DeviceFingerprint  string `json:"device_fingerprint,omitempty"`
+	DeviceSignature    string `json:"device_signature,omitempty"`
+	DeviceProofVersion string `json:"device_proof_version,omitempty"`
 }
 
 type enrollResponse struct {
@@ -103,6 +142,10 @@ type enrollResponse struct {
 }
 
 func enrollWithHub(ctx context.Context, cfg *RuntimeConfig) (*enrollResponse, error) {
+	return enrollWithHubWithIdentityProof(ctx, cfg, nil, "")
+}
+
+func enrollWithHubWithIdentityProof(ctx context.Context, cfg *RuntimeConfig, identity *deviceIdentity, continuityAssetID string) (*enrollResponse, error) {
 	// Build enroll URL from WSBaseURL or APIBaseURL
 	var enrollURL string
 	if cfg.APIBaseURL != "" {
@@ -132,8 +175,14 @@ func enrollWithHub(ctx context.Context, cfg *RuntimeConfig) (*enrollResponse, er
 	}
 
 	hostname, _ := os.Hostname()
-	if hostname == "" {
+	if validEnrollmentAssetID(cfg.AssetID) {
 		hostname = cfg.AssetID
+	}
+	if continuityAssetID != "" {
+		hostname = continuityAssetID
+	}
+	if hostname == "" {
+		hostname = "labtether-agent"
 	}
 
 	reqBody := enrollRequest{
@@ -141,6 +190,20 @@ func enrollWithHub(ctx context.Context, cfg *RuntimeConfig) (*enrollResponse, er
 		Hostname:        hostname,
 		Platform:        runtime.GOOS,
 		GroupID:         cfg.GroupID,
+	}
+	if identity != nil {
+		reqBody.DeviceKeyAlg = identity.KeyAlgorithm
+		reqBody.DevicePublicKey = identity.PublicKeyBase64
+		reqBody.DeviceFingerprint = identity.Fingerprint
+		var payload []byte
+		if continuityAssetID != "" {
+			reqBody.DeviceProofVersion = "v2"
+			payload = agentidentity.BuildTokenEnrollmentProofPayloadV2(continuityAssetID, cfg.EnrollmentToken, identity.Fingerprint)
+		} else {
+			reqBody.DeviceProofVersion = "v1"
+			payload = agentidentity.BuildTokenEnrollmentProofPayload(hostname, cfg.EnrollmentToken, identity.Fingerprint)
+		}
+		reqBody.DeviceSignature = base64.StdEncoding.EncodeToString(ed25519.Sign(identity.PrivateKey, payload))
 	}
 
 	body, err := json.Marshal(reqBody)
@@ -193,11 +256,7 @@ func saveTokenToFile(path, token string) error {
 	if path == "" {
 		return nil
 	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
-	}
-	return os.WriteFile(path, []byte(token+"\n"), 0600)
+	return writeSecretFileAtomic(path, []byte(token+"\n"))
 }
 
 // validateCACertPEM parses a PEM-encoded certificate and verifies it has the

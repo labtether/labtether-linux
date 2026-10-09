@@ -49,7 +49,7 @@ func Run(ctx context.Context, cfg RuntimeConfig, provider TelemetryProvider) err
 	}
 
 	// Resolve API token: explicit env → persisted file → enrollment
-	if err := ResolveToken(ctx, &cfg); err != nil {
+	if err := resolveTokenWithIdentity(ctx, &cfg, identity); err != nil {
 		log.Printf("%s: token resolution failed: %v", cfg.Name, err)
 	}
 
@@ -97,8 +97,6 @@ func Run(ctx context.Context, cfg RuntimeConfig, provider TelemetryProvider) err
 		staticMeta["agent_device_fingerprint"] = identity.Fingerprint
 		staticMeta["agent_device_key_alg"] = identity.KeyAlgorithm
 	}
-	httpPublisher := NewHeartbeatPublisher(cfg, staticMeta)
-
 	var publisher HeartbeatPublisher
 	var transport *wsTransport
 
@@ -109,25 +107,15 @@ func Run(ctx context.Context, cfg RuntimeConfig, provider TelemetryProvider) err
 		}
 
 		transport = newWSTransport(cfg.WSBaseURL, cfg.APIToken, cfg.AssetID, platform, cfg.Version, buildTLSConfig(&cfg), cfg.TokenFilePath, identity)
+		if cfg.APIBaseURL != "" {
+			transport.apiBaseURL = normalizeAPIBaseURL(cfg.APIBaseURL)
+		}
+		httpPublisher := newHeartbeatPublisher(cfg, staticMeta, transport.identitySnapshot)
 
 		// Set re-enrollment callback if enrollment token is configured.
 		if cfg.EnrollmentToken != "" {
 			transport.reEnrollFn = func() (string, error) {
-				cfgCopy := cfg
-				cfgCopy.APIToken = "" // force re-enrollment path
-				if err := ResolveToken(ctx, &cfgCopy); err != nil {
-					return "", err
-				}
-				if cfgCopy.APIToken == "" {
-					return "", fmt.Errorf("re-enrollment returned empty token")
-				}
-				// Persist the new token to disk for next startup.
-				if cfg.TokenFilePath != "" {
-					_ = saveTokenToFile(cfg.TokenFilePath, cfgCopy.APIToken)
-				}
-				// Note: transport.updateToken() is called by the reconnect loop
-				// after this returns; no need to mutate the outer cfg.
-				return cfgCopy.APIToken, nil
+				return reEnrollAgainstActiveHub(ctx, cfg, transport)
 			}
 		}
 
@@ -252,7 +240,7 @@ func Run(ctx context.Context, cfg RuntimeConfig, provider TelemetryProvider) err
 		return runtime.Run(ctx)
 	}
 
-	publisher = httpPublisher
+	publisher = NewHeartbeatPublisher(cfg, staticMeta)
 	runtime := NewRuntime(cfg, provider, publisher)
 	runtime.deviceIdentity = identity
 	return runtime.Run(ctx)
@@ -270,6 +258,9 @@ func replayBufferedTelemetry(transport *wsTransport, telemetryBuf *RingBuffer[Te
 
 	log.Printf("agentws: replaying %d buffered telemetry samples", len(buffered))
 	for _, sample := range buffered {
+		if assetID := transport.AssetID(); assetID != "" {
+			sample.AssetID = assetID
+		}
 		sendTelemetrySample(transport, sample)
 	}
 }

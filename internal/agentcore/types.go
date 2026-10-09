@@ -40,7 +40,9 @@ type RuntimeConfig struct {
 	LogStreamEnabled                          bool          // LABTETHER_LOG_STREAM_ENABLED — enable continuous system log streaming
 	EnrollmentToken                           string        // LABTETHER_ENROLLMENT_TOKEN — used for auto-enrollment
 	EnrollmentTokenFilePath                   string        // LABTETHER_ENROLLMENT_TOKEN_FILE — optional file-based auto-enrollment token source
+	EnrollmentTokenFromFile                   bool          // True when the one-time token was loaded from EnrollmentTokenFilePath
 	TokenFilePath                             string        // LABTETHER_TOKEN_FILE — path to persist agent token
+	APITokenFromFile                          bool          // True when the agent token was loaded from TokenFilePath
 	DeviceKeyPath                             string        // LABTETHER_DEVICE_KEY_FILE — device private key path
 	DevicePublicKeyPath                       string        // LABTETHER_DEVICE_PUBLIC_KEY_FILE — device public key path
 	DeviceFingerprintPath                     string        // LABTETHER_DEVICE_FINGERPRINT_FILE — human-visible device fingerprint
