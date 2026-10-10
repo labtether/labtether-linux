@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || (github.event_name == 'push' && github.ref_type == 'branch' && github.ref) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_type == 'branch') }}
+
 permissions:
   contents: read
 
@@ -13,10 +17,37 @@ jobs:
     name: Handwritten code / 500-line limit
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      checks_required: ${{ steps.select.outputs.checks_required }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
+      - name: Select source checks
+        id: select
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import subprocess
+          base = os.environ.get("BASE_SHA", "")
+          required = True
+          if base and set(base) != {"0"}:
+              result = subprocess.run(
+                  ["git", "diff", "--name-only", "--no-renames", "-z", base, "HEAD"],
+                  check=True, capture_output=True,
+              )
+              paths = [os.fsdecode(p) for p in result.stdout.split(b"\0") if p]
+              prose = {"README.md", "CHANGELOG.md", "AGENTS.md", "CLAUDE.md", "LICENSE"}
+              required = any(
+                  p not in prose and not (p.startswith(("docs/", "notes/")) and p.endswith(".md"))
+                  for p in paths
+              )
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"checks_required={str(required).lower()}\n")
+          PY
       - name: Check line-limit gate behavior
         run: python3 -m unittest scripts/ci/test_line_limit.py
       - name: Enforce full-repository line limit
@@ -24,7 +55,7 @@ jobs:
 
   fast-contracts:
     needs: [line-limit]
-    if: always()
+    if: ${{ !cancelled() }}
     name: Fast Linux agent contracts
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -43,6 +74,7 @@ jobs:
         with:
           go-version: '1.26.9'
       - name: Check formatting
+        if: needs.line-limit.outputs.checks_required != 'false'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         shell: bash
@@ -68,33 +100,48 @@ jobs:
             exit 1
           fi
       - name: Vet
+        if: needs.line-limit.outputs.checks_required != 'false'
         run: |
           go vet ./...
       - name: Race and behavior tests
+        if: needs.line-limit.outputs.checks_required != 'false'
         run: |
           go test -race ./...
       - name: Build installed Linux command
+        if: needs.line-limit.outputs.checks_required != 'false'
         run: |
           go build -trimpath -o "${RUNNER_TEMP}/labtether-agent" ./cmd/labtether-agent
       - name: Verify installed command starts
+        if: needs.line-limit.outputs.checks_required != 'false'
         run: |
           "${RUNNER_TEMP}/labtether-agent" --help >/dev/null
       - name: Install pinned source-quality tools
         env:
           GOBIN: ${{ runner.temp }}/quality-bin
+          CHECKS_REQUIRED: ${{ needs.line-limit.outputs.checks_required }}
         run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@v2.25.0
+          if [[ "${CHECKS_REQUIRED}" != "false" ]]; then
+            go install github.com/securego/gosec/v2/cmd/gosec@v2.25.0
+          fi
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
           go install github.com/zricethezav/gitleaks/v8@v8.30.1
           echo "${GOBIN}" >> "${GITHUB_PATH}"
       - name: Security and workflow contracts
+        env:
+          CHECKS_REQUIRED: ${{ needs.line-limit.outputs.checks_required }}
         run: |
-          gosec -quiet ./...
+          if [[ "${CHECKS_REQUIRED}" != "false" ]]; then
+            gosec -quiet ./...
+          fi
           actionlint
           gitleaks dir . --no-banner --redact --timeout 300
 
   cross-platform-source-contract:
     name: Source portability (${{ matrix.goos }}/${{ matrix.goarch }})
+    needs: [line-limit]
+    if: >-
+      !cancelled() && (needs.line-limit.result != 'success' ||
+      needs.line-limit.outputs.checks_required != 'false')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -112,6 +159,10 @@ jobs:
           - goos: freebsd
             goarch: amd64
     steps:
+      - name: Require source-size and selection gates
+        env:
+          LINE_LIMIT_RESULT: ${{ needs.line-limit.result }}
+        run: test "${LINE_LIMIT_RESULT}" = success
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
