@@ -114,7 +114,7 @@ func TestReplayBufferedTelemetrySendsSamplesInOrder(t *testing.T) {
 func TestWSHeartbeatPublisherFallsBackToHTTPWhenDisconnected(t *testing.T) {
 	fallback := &recordingHeartbeatPublisher{}
 	publisher := newWSHeartbeatPublisher(&wsTransport{}, fallback, RuntimeConfig{
-		Source: "agent",
+		Source:  "agent",
 		GroupID: "group-1",
 	}, map[string]string{
 		"platform": "linux",
@@ -141,19 +141,21 @@ func TestWSHeartbeatPublisherSendsHeartbeatWhenConnected(t *testing.T) {
 
 	fallback := &recordingHeartbeatPublisher{}
 	publisher := newWSHeartbeatPublisher(transport, fallback, RuntimeConfig{
-		Source: "agent",
+		Source:  "agent",
 		GroupID: "group-1",
 	}, map[string]string{
-		"os_name": "Ubuntu 24.04 LTS",
+		"os_name":                   "Ubuntu 24.04 LTS",
+		"disk_root_available_bytes": "10",
 	}, []string{"terminal", "files"})
 
 	if err := publisher.Publish(context.Background(), TelemetrySample{
-		AssetID:          "node-1",
-		CPUPercent:       41,
-		MemoryPercent:    52,
-		DiskPercent:      63,
-		NetRXBytesPerSec: 74,
-		NetTXBytesPerSec: 85,
+		AssetID:           "node-1",
+		CPUPercent:        41,
+		MemoryPercent:     52,
+		DiskPercent:       63,
+		NetRXBytesPerSec:  74,
+		NetTXBytesPerSec:  85,
+		heartbeatMetadata: map[string]string{"disk_root_available_bytes": "90"},
 	}); err != nil {
 		t.Fatalf("Publish returned error: %v", err)
 	}
@@ -178,6 +180,9 @@ func TestWSHeartbeatPublisherSendsHeartbeatWhenConnected(t *testing.T) {
 	}
 	if heartbeat.Metadata["agent_messages_sent"] == "" || heartbeat.Metadata["agent_uptime_sec"] == "" {
 		t.Fatalf("expected transport diagnostics in heartbeat metadata, got %+v", heartbeat.Metadata)
+	}
+	if got := heartbeat.Metadata["disk_root_available_bytes"]; got != "90" {
+		t.Fatalf("WS heartbeat available bytes=%q, want 90", got)
 	}
 	if got := len(fallback.snapshot()); got != 0 {
 		t.Fatalf("expected no fallback publishes while connected, got %d", got)
