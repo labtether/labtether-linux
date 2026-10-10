@@ -148,7 +148,7 @@ func CollectProcesses() ([]agentmgr.ProcessInfo, error) {
 	defer cancel()
 
 	return collectProcessesWithPS(func(args ...string) ([]byte, error) {
-		return exec.CommandContext(ctx, "ps", args...).CombinedOutput()
+		return exec.CommandContext(ctx, "ps", args...).CombinedOutput() // #nosec G204 -- Fixed ps executable and literal flags from collectProcessesWithPS; no user input.
 	})
 }
 
