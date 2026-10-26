@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	protocol "github.com/labtether/labtether-linux/pkg/agentmgr"
+	"github.com/labtether/labtether-linux/pkg/agentmgr"
 )
 
 type commandOutputOwnerTransport struct {
@@ -23,8 +23,8 @@ type commandOutputOwnerTransport struct {
 func (s commandOutputOwnerTransport) Context() context.Context { return s.ctx }
 
 // This executes the real request handler and an actual child/descendant pair.
-// Releasing the descendant is an explicit fixture protocol; no PID-tree kill
-// or enumeration of unrelated processes is used, including on failure.
+// Releasing the descendant is an explicit fixture protocol; cancellation may
+// stop only the command's own process group, never unrelated processes.
 func TestHandleCommandRequestBoundsInheritedOutputDrain(t *testing.T) {
 	for _, mode := range []string{"exited-parent", "canceled-owner"} {
 		t.Run(mode, func(t *testing.T) {
@@ -39,7 +39,7 @@ func TestHandleCommandRequestBoundsInheritedOutputDrain(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			transport := commandOutputOwnerTransport{newMockTransport(), ctx}
-			request := protocol.CommandRequestData{JobID: "drain-job", SessionID: "drain-session", CommandID: "drain-command", Timeout: 10,
+			request := agentmgr.CommandRequestData{JobID: "drain-job", SessionID: "drain-session", CommandID: "drain-command", Timeout: 10,
 				Command: quoted + " -test.run=^TestRemoteCommandOutputHelper$ -- " + mode + " " + strconv.Quote(dir)}
 			raw, err := json.Marshal(request)
 			if err != nil {
@@ -52,7 +52,13 @@ func TestHandleCommandRequestBoundsInheritedOutputDrain(t *testing.T) {
 					t.Error(err)
 				}
 				if _, err := os.Stat(filepath.Join(dir, "ready")); err == nil {
-					if !waitRemoteCommandFixtureFile(filepath.Join(dir, "closed"), 3*time.Second) {
+					if mode == "canceled-owner" && remoteCommandKillsProcessGroup {
+						// Cancellation stopped the command's process group, so the
+						// descendant must not survive to observe the release marker.
+						if waitRemoteCommandFixtureFile(filepath.Join(dir, "closed"), 500*time.Millisecond) {
+							t.Error("canceled command left its descendant running")
+						}
+					} else if !waitRemoteCommandFixtureFile(filepath.Join(dir, "closed"), 3*time.Second) {
 						t.Error("owned fixture descendant did not release its output")
 					}
 				}
@@ -64,7 +70,7 @@ func TestHandleCommandRequestBoundsInheritedOutputDrain(t *testing.T) {
 			})
 			go func() {
 				defer close(finished)
-				HandleCommandRequest(transport, protocol.Message{Type: protocol.MsgCommandRequest, Data: raw}, ExecConfig{APIToken: "opaque-test-token"})
+				HandleCommandRequest(transport, agentmgr.Message{Type: agentmgr.MsgCommandRequest, Data: raw}, ExecConfig{APIToken: "opaque-test-token"})
 			}()
 			if !waitRemoteCommandFixtureFile(filepath.Join(dir, "ready"), 3*time.Second) {
 				t.Fatal("fixture did not start")
@@ -77,10 +83,10 @@ func TestHandleCommandRequestBoundsInheritedOutputDrain(t *testing.T) {
 			case <-time.After(3 * time.Second):
 				t.Fatal("inherited output kept request handler occupied")
 			}
-			var result protocol.CommandResultData
+			var result agentmgr.CommandResultData
 			select {
 			case message := <-transport.messages:
-				if message.Type != protocol.MsgCommandResult {
+				if message.Type != agentmgr.MsgCommandResult {
 					t.Fatalf("unexpected result type: %s", message.Type)
 				}
 				if err := json.Unmarshal(message.Data, &result); err != nil {
