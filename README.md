@@ -56,7 +56,7 @@ An explicit `LABTETHER_TLS_CA_FILE` remains in use after enrollment.
 ## Build From Source
 
 ```bash
-# Requires Go 1.27.2+ (see go.mod)
+# Requires Go 1.27.3+ (see go.mod)
 go build -o labtether-agent ./cmd/labtether-agent/
 ```
 
