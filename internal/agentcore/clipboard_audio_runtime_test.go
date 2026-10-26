@@ -7,8 +7,8 @@ import (
 	"errors"
 	"io"
 
-	"github.com/labtether/labtether-linux/internal/agentcore/sysconfig"
 	"github.com/labtether/labtether-linux/internal/agentcore/remoteaccess"
+	"github.com/labtether/labtether-linux/internal/agentcore/sysconfig"
 	"strings"
 	"testing"
 	"time"
