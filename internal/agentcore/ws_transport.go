@@ -86,6 +86,11 @@ const (
 const (
 	clientPingInterval = 25 * time.Second
 	clientReadDeadline = 60 * time.Second
+	// Agent control messages are JSON envelopes containing bounded chunks. A
+	// 16 MiB ceiling leaves ample room for desktop/file payloads while ensuring
+	// a compromised or malfunctioning hub cannot force unbounded allocation in
+	// gorilla/websocket's JSON decoder.
+	maxAgentControlMessageBytes int64 = 16 * 1024 * 1024
 )
 
 type wsTransport struct {
@@ -242,6 +247,7 @@ func (t *wsTransport) connectWithResponse(ctx context.Context) (*http.Response, 
 		}
 		return resp, err
 	}
+	conn.SetReadLimit(maxAgentControlMessageBytes)
 
 	// Set initial read deadline; the pong handler resets it on each pong.
 	_ = conn.SetReadDeadline(time.Now().Add(clientReadDeadline))
