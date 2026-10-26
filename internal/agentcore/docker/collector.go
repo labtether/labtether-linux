@@ -301,11 +301,12 @@ func (dc *DockerCollector) refreshAndPublishContainerDelta(ctx context.Context) 
 	if err != nil {
 		return false, fmt.Errorf("containers: %w", err)
 	}
-	if len(rawContainers) > maxContainersPerHost {
+	incomplete := len(rawContainers) > maxContainersPerHost
+	if incomplete {
 		rawContainers = rawContainers[:maxContainersPerHost]
 	}
 	nextContainers, runningIDs := buildContainerInfoMap(rawContainers)
-	nextCompose := inferComposeStacks(rawContainers)
+	nextCompose := inferCompleteComposeStacks(rawContainers, incomplete)
 
 	upserts, removals := diffContainerInfoMap(previousContainers, nextContainers)
 	composeChanged := !composeStacksEqual(previousCompose, nextCompose)
@@ -323,6 +324,7 @@ func (dc *DockerCollector) refreshAndPublishContainerDelta(ctx context.Context) 
 		UpsertContainers:   upserts,
 		RemoveContainerIDs: removals,
 	}
+	delta.ComposeActionVersion, delta.ComposeEndpointID = dc.composeWireContract()
 	if composeChanged {
 		delta.ReplaceComposeStacks = true
 		delta.ComposeStacks = cloneComposeStacks(nextCompose)
@@ -374,6 +376,7 @@ func (dc *DockerCollector) sendDockerMessage(messageType string, payload any) er
 
 func (dc *DockerCollector) collectFullDiscovery(ctx context.Context) (agentmgr.DockerDiscoveryData, dockerInventorySnapshot, map[string]struct{}, error) {
 	result := agentmgr.DockerDiscoveryData{HostID: dc.currentAssetID()}
+	result.ComposeActionVersion, result.ComposeEndpointID = dc.composeWireContract()
 	snapshot := dockerInventorySnapshot{
 		Containers: make(map[string]agentmgr.DockerContainerInfo),
 		Images:     make(map[string]agentmgr.DockerImageInfo),
@@ -397,13 +400,14 @@ func (dc *DockerCollector) collectFullDiscovery(ctx context.Context) (agentmgr.D
 	if err != nil {
 		return result, snapshot, nil, fmt.Errorf("containers: %w", err)
 	}
-	if len(rawContainers) > maxContainersPerHost {
+	incomplete := len(rawContainers) > maxContainersPerHost
+	if incomplete {
 		rawContainers = rawContainers[:maxContainersPerHost]
 	}
 	var runningIDs map[string]struct{}
 	snapshot.Containers, runningIDs = buildContainerInfoMap(rawContainers)
 	result.Containers = containerInfoMapToSlice(snapshot.Containers)
-	result.ComposeStacks = inferComposeStacks(rawContainers)
+	result.ComposeStacks = inferCompleteComposeStacks(rawContainers, incomplete)
 	snapshot.ComposeStacks = cloneComposeStacks(result.ComposeStacks)
 
 	if images, err := dc.client.listImages(ctx); err == nil {

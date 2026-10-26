@@ -307,7 +307,7 @@ func receiveLoop(ctx context.Context, transport *wsTransport, cfg RuntimeConfig,
 					dockerCollector.HandleDockerAction(sender, msg)
 				})
 			}
-		case agentmgr.MsgDockerComposeAction:
+		case agentmgr.MsgDockerComposeAction, agentmgr.MsgDockerComposeActionV2:
 			if dockerCollector != nil {
 				dispatch(msg.Type, func() {
 					dockerCollector.HandleComposeAction(sender, msg)

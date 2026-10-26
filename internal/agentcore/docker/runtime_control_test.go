@@ -352,14 +352,15 @@ func TestHandleComposeActionDeployWritesComposeFileAndQueuesRefresh(t *testing.T
 	})
 
 	dockerComposeCLIDetect = func() (int, bool) { return 2, true }
+	recordPath := filepath.Join(t.TempDir(), "deploy-child.json")
 	dockerComposeNewCommandContext = func(ctx context.Context, name string, args ...string) (*exec.Cmd, error) {
 		if name != "docker" {
 			t.Fatalf("compose command name=%q, want docker", name)
 		}
-		if len(args) < 5 || args[0] != "compose" || args[3] != "up" || args[4] != "-d" {
+		if len(args) != 11 || args[0] != "--host" || args[2] != "compose" || args[5] != "-p" || args[6] != "my-stack" || args[7] != "-f" || args[9] != "up" || args[10] != "-d" {
 			t.Fatalf("unexpected compose command args: %v", args)
 		}
-		return exec.CommandContext(ctx, "sh", "-c", "printf 'compose ok'"), nil
+		return exec.CommandContext(ctx, os.Args[0], append([]string{"-test.run=^TestComposeSelectionChild$", "--", "compose-selection-child", recordPath, name}, args...)...), nil
 	}
 
 	transport := newRecordingCollectorTransport(true)
@@ -369,7 +370,8 @@ func TestHandleComposeActionDeployWritesComposeFileAndQueuesRefresh(t *testing.T
 	configDir := t.TempDir()
 	raw, err := json.Marshal(agentmgr.DockerComposeActionData{
 		RequestID:   "compose-1",
-		StackName:   "My Stack",
+		EndpointID:  dc.composeEndpointID(),
+		StackName:   "my-stack",
 		Action:      "deploy",
 		ConfigDir:   configDir,
 		ComposeYAML: "services:\n  app:\n    image: nginx:1.27\n",
@@ -378,7 +380,7 @@ func TestHandleComposeActionDeployWritesComposeFileAndQueuesRefresh(t *testing.T
 		t.Fatalf("marshal docker compose action: %v", err)
 	}
 
-	dc.HandleComposeAction(transport, agentmgr.Message{Type: agentmgr.MsgDockerComposeAction, Data: raw})
+	dc.HandleComposeAction(transport, agentmgr.Message{Type: agentmgr.MsgDockerComposeActionV2, Data: raw})
 
 	msg := waitForCollectorMessage(t, transport, time.Second)
 	if msg.Type != agentmgr.MsgDockerComposeResult {
@@ -400,10 +402,15 @@ func TestHandleComposeActionDeployWritesComposeFileAndQueuesRefresh(t *testing.T
 	if err != nil {
 		t.Fatalf("read compose file: %v", err)
 	}
-	if string(composeBytes) != "services:\n  app:\n    image: nginx:1.27" {
+	if string(composeBytes) != "services:\n  app:\n    image: nginx:1.27\n" {
 		t.Fatalf("unexpected compose file contents %q", string(composeBytes))
 	}
 
+	var child composeChildRecord
+	recordBytes, readErr := os.ReadFile(recordPath)
+	if readErr != nil || json.Unmarshal(recordBytes, &child) != nil || child.Dir != configDir || child.Args[9] != filepath.Join(configDir, "docker-compose.yml") {
+		t.Fatalf("deploy child selection changed: %+v read=%v", child, readErr)
+	}
 	if len(dc.discoveryTriggerCh) != 1 {
 		t.Fatalf("discovery triggers=%d, want 1", len(dc.discoveryTriggerCh))
 	}

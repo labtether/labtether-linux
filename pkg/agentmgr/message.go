@@ -141,24 +141,25 @@ const (
 	MsgEnrollmentRejected  = "enrollment.rejected"  // Hub → Agent: enrollment rejected
 
 	// Docker container management messages.
-	MsgDockerDiscovery      = "docker.discovery"       // Agent → Hub: full inventory
-	MsgDockerDiscoveryDelta = "docker.discovery.delta" // Agent → Hub: incremental inventory update
-	MsgDockerStats          = "docker.stats"           // Agent → Hub: container stats
-	MsgDockerEvents         = "docker.events"          // Agent → Hub: daemon events
-	MsgDockerAction         = "docker.action"          // Hub → Agent: lifecycle command
-	MsgDockerActionResult   = "docker.action.result"   // Agent → Hub: action result
-	MsgDockerLogsStart      = "docker.logs.start"      // Hub → Agent: start log stream
-	MsgDockerLogsStop       = "docker.logs.stop"       // Hub → Agent: stop log stream
-	MsgDockerLogsStream     = "docker.logs.stream"     // Agent → Hub: log lines
-	MsgDockerExecStart      = "docker.exec.start"      // Hub → Agent: start exec session
-	MsgDockerExecStarted    = "docker.exec.started"    // Agent → Hub: exec ready
-	MsgDockerExecData       = "docker.exec.data"       // Agent → Hub: exec output
-	MsgDockerExecInput      = "docker.exec.input"      // Hub → Agent: exec stdin
-	MsgDockerExecResize     = "docker.exec.resize"     // Hub → Agent: resize exec PTY
-	MsgDockerExecClose      = "docker.exec.close"      // Hub → Agent: close exec
-	MsgDockerExecClosed     = "docker.exec.closed"     // Agent → Hub: exec ended
-	MsgDockerComposeAction  = "docker.compose.action"  // Hub → Agent: stack operation
-	MsgDockerComposeResult  = "docker.compose.result"  // Agent → Hub: stack result
+	MsgDockerDiscovery       = "docker.discovery"         // Agent → Hub: full inventory
+	MsgDockerDiscoveryDelta  = "docker.discovery.delta"   // Agent → Hub: incremental inventory update
+	MsgDockerStats           = "docker.stats"             // Agent → Hub: container stats
+	MsgDockerEvents          = "docker.events"            // Agent → Hub: daemon events
+	MsgDockerAction          = "docker.action"            // Hub → Agent: lifecycle command
+	MsgDockerActionResult    = "docker.action.result"     // Agent → Hub: action result
+	MsgDockerLogsStart       = "docker.logs.start"        // Hub → Agent: start log stream
+	MsgDockerLogsStop        = "docker.logs.stop"         // Hub → Agent: stop log stream
+	MsgDockerLogsStream      = "docker.logs.stream"       // Agent → Hub: log lines
+	MsgDockerExecStart       = "docker.exec.start"        // Hub → Agent: start exec session
+	MsgDockerExecStarted     = "docker.exec.started"      // Agent → Hub: exec ready
+	MsgDockerExecData        = "docker.exec.data"         // Agent → Hub: exec output
+	MsgDockerExecInput       = "docker.exec.input"        // Hub → Agent: exec stdin
+	MsgDockerExecResize      = "docker.exec.resize"       // Hub → Agent: resize exec PTY
+	MsgDockerExecClose       = "docker.exec.close"        // Hub → Agent: close exec
+	MsgDockerExecClosed      = "docker.exec.closed"       // Agent → Hub: exec ended
+	MsgDockerComposeAction   = "docker.compose.action"    // Hub → Agent: stack operation
+	MsgDockerComposeActionV2 = "docker.compose.action.v2" // Hub → Agent: exact ordered config selection
+	MsgDockerComposeResult   = "docker.compose.result"    // Agent → Hub: stack result
 
 	// Web service discovery messages.
 	MsgWebServiceReport = "webservice.report" // Agent → Hub: discovered services
@@ -212,7 +213,7 @@ var KnownMessageTypes = map[string]bool{
 	MsgDockerExecStart: true, MsgDockerExecStarted: true, MsgDockerExecData: true,
 	MsgDockerExecInput: true, MsgDockerExecResize: true,
 	MsgDockerExecClose: true, MsgDockerExecClosed: true,
-	MsgDockerComposeAction: true, MsgDockerComposeResult: true,
+	MsgDockerComposeAction: true, MsgDockerComposeActionV2: true, MsgDockerComposeResult: true,
 	MsgWebServiceReport: true, MsgWebServiceSync: true,
 }
 
