@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -27,13 +28,26 @@ func newHeartbeatPublisher(cfg RuntimeConfig, staticMetadata map[string]string, 
 		log.Printf("%s heartbeat disabled: LABTETHER_API_BASE_URL/LABTETHER_API_TOKEN not configured", cfg.Name)
 		return noopHeartbeatPublisher{}
 	}
-	transport := &http.Transport{}
+	transport := &http.Transport{
+		MaxIdleConns:        2,
+		MaxIdleConnsPerHost: 1,
+		IdleConnTimeout:     90 * time.Second,
+	}
 	if tlsCfg := buildTLSConfig(&cfg); tlsCfg != nil {
 		transport.TLSClientConfig = tlsCfg
 	}
+	scheme := "https"
+	if endpoint, err := url.Parse(cfg.APIBaseURL); err == nil && endpoint.Scheme != "" {
+		scheme = endpoint.Scheme
+	}
 
+	// One owned secure pool lets fallback heartbeats reuse their TLS connection;
+	// URL, dial and redirect policy are still checked on every request.
 	return &apiHeartbeatPublisher{
-		client:         &http.Client{Timeout: 6 * time.Second, Transport: transport},
+		client: securityruntime.NewReusableOutboundHTTPClient(&http.Client{
+			Timeout:   6 * time.Second,
+			Transport: transport,
+		}, scheme),
 		cfg:            cfg,
 		meta:           cloneStringMap(staticMetadata),
 		identitySource: identitySource,
