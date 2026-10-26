@@ -27,6 +27,9 @@ var (
 // DesktopSessionTypeWayland is the session type constant for Wayland sessions.
 const DesktopSessionTypeWayland = "wayland"
 
+// DesktopSessionTypeX11 is the session type constant for X11 sessions.
+const DesktopSessionTypeX11 = "x11"
+
 func PlatformListDisplays() ([]agentmgr.DisplayInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
