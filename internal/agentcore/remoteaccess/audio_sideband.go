@@ -100,8 +100,8 @@ func (m *AudioSidebandManager) PrepareAudioStart(transport MessageSender, msg ag
 }
 
 // handleAudioStop processes a desktop.audio.stop message from the hub.
-func (m *AudioSidebandManager) HandleAudioStop(msg agentmgr.Message) {
-	if stop := m.PrepareAudioStop(nil, msg); stop != nil {
+func (m *AudioSidebandManager) HandleAudioStop(transport MessageSender, msg agentmgr.Message) {
+	if stop := m.PrepareAudioStop(transport, msg); stop != nil {
 		stop()
 	}
 }
