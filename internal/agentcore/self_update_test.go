@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -59,6 +60,8 @@ func TestBuildAgentReleaseCheckURL(t *testing.T) {
 }
 
 func TestCheckAndApplySelfUpdate_ReplacesExecutable(t *testing.T) {
+	t.Setenv(envSelfUpdateAcceptUnsigned, "true")
+	t.Setenv(envSelfUpdateTrustedPublicKey, "")
 	t.Setenv(envAllowInsecureTransport, "true")
 	t.Setenv("LABTETHER_OUTBOUND_ALLOW_LOOPBACK", "true")
 	tempDir := t.TempDir()
@@ -76,6 +79,8 @@ func TestCheckAndApplySelfUpdate_ReplacesExecutable(t *testing.T) {
 		case "/release":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"version": "v2.0.0",
+				"os":      runtime.GOOS,
+				"arch":    runtime.GOARCH,
 				"sha256":  newSHA,
 				"url":     server.URL + "/binary",
 			})
@@ -115,6 +120,8 @@ func TestCheckAndApplySelfUpdate_ReplacesExecutable(t *testing.T) {
 }
 
 func TestCheckAndApplySelfUpdate_NoopWhenChecksumMatches(t *testing.T) {
+	t.Setenv(envSelfUpdateAcceptUnsigned, "true")
+	t.Setenv(envSelfUpdateTrustedPublicKey, "")
 	t.Setenv(envAllowInsecureTransport, "true")
 	t.Setenv("LABTETHER_OUTBOUND_ALLOW_LOOPBACK", "true")
 	tempDir := t.TempDir()
@@ -130,6 +137,8 @@ func TestCheckAndApplySelfUpdate_NoopWhenChecksumMatches(t *testing.T) {
 		if r.URL.Path == "/release" {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"version": "v2.0.0",
+				"os":      runtime.GOOS,
+				"arch":    runtime.GOARCH,
 				"sha256":  currentSHA,
 				"url":     server.URL + "/binary",
 			})
@@ -159,6 +168,8 @@ func TestCheckAndApplySelfUpdate_NoopWhenChecksumMatches(t *testing.T) {
 }
 
 func TestCheckAndApplySelfUpdate_ForceWhenChecksumMatches(t *testing.T) {
+	t.Setenv(envSelfUpdateAcceptUnsigned, "true")
+	t.Setenv(envSelfUpdateTrustedPublicKey, "")
 	t.Setenv(envAllowInsecureTransport, "true")
 	t.Setenv("LABTETHER_OUTBOUND_ALLOW_LOOPBACK", "true")
 	tempDir := t.TempDir()
@@ -174,6 +185,8 @@ func TestCheckAndApplySelfUpdate_ForceWhenChecksumMatches(t *testing.T) {
 		if r.URL.Path == "/release" {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"version": "v2.0.0",
+				"os":      runtime.GOOS,
+				"arch":    runtime.GOARCH,
 				"sha256":  currentSHA,
 				"url":     server.URL + "/binary",
 			})
@@ -204,6 +217,7 @@ func TestCheckAndApplySelfUpdate_ForceWhenChecksumMatches(t *testing.T) {
 
 func TestValidateReleaseMetadataRejectsCrossOriginByDefault(t *testing.T) {
 	release := agentReleaseMetadata{
+		Version: "v2.0.0", OS: runtime.GOOS, Arch: runtime.GOARCH,
 		SHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 	}
 	err := validateReleaseMetadata("https://hub.example.com/api/v1/agent/releases/latest", "https://cdn.example.com/agent.bin", release)
@@ -213,10 +227,10 @@ func TestValidateReleaseMetadataRejectsCrossOriginByDefault(t *testing.T) {
 }
 
 func TestShouldAttachUpdateTokenOnlyForSameOrigin(t *testing.T) {
-	if !shouldAttachUpdateToken("https://hub.example.com/api/v1/agent/releases/latest", "https://hub.example.com/api/v1/agent/binary") {
+	if !shouldAttachUpdateToken(RuntimeConfig{APIBaseURL: "https://hub.example.com"}, "https://hub.example.com/api/v1/agent/binary") {
 		t.Fatalf("expected token forwarding for same-origin download")
 	}
-	if shouldAttachUpdateToken("https://hub.example.com/api/v1/agent/releases/latest", "https://cdn.example.com/agent.bin") {
+	if shouldAttachUpdateToken(RuntimeConfig{APIBaseURL: "https://hub.example.com"}, "https://cdn.example.com/agent.bin") {
 		t.Fatalf("expected token forwarding to be disabled for cross-origin download")
 	}
 }
@@ -272,7 +286,7 @@ func TestDownloadReleaseBinary(t *testing.T) {
 		}))
 		defer server.Close()
 
-		payload, err := downloadReleaseBinary(RuntimeConfig{APIToken: "token-123"}, server.URL+"/release", server.URL+"/binary", int64(len("same-origin-binary")))
+		payload, err := downloadReleaseBinary(RuntimeConfig{APIBaseURL: server.URL, APIToken: "token-123"}, server.URL+"/binary", int64(len("same-origin-binary")))
 		if err != nil {
 			t.Fatalf("downloadReleaseBinary returned error: %v", err)
 		}
@@ -293,7 +307,7 @@ func TestDownloadReleaseBinary(t *testing.T) {
 		}))
 		defer server.Close()
 
-		payload, err := downloadReleaseBinary(RuntimeConfig{APIToken: "token-123"}, "https://hub.example.com/release", server.URL+"/binary", int64(len("cross-origin-binary")))
+		payload, err := downloadReleaseBinary(RuntimeConfig{APIBaseURL: "https://hub.example.com", APIToken: "token-123"}, server.URL+"/binary", int64(len("cross-origin-binary")))
 		if err != nil {
 			t.Fatalf("downloadReleaseBinary returned error: %v", err)
 		}
@@ -312,7 +326,7 @@ func TestDownloadReleaseBinary(t *testing.T) {
 		}))
 		defer server.Close()
 
-		if _, err := downloadReleaseBinary(RuntimeConfig{}, server.URL+"/release", server.URL+"/binary", 0); err == nil {
+		if _, err := downloadReleaseBinary(RuntimeConfig{}, server.URL+"/binary", 0); err == nil {
 			t.Fatalf("expected status error")
 		}
 	})
@@ -324,7 +338,7 @@ func TestDownloadReleaseBinary(t *testing.T) {
 		}))
 		defer server.Close()
 
-		if _, err := downloadReleaseBinary(RuntimeConfig{}, server.URL+"/release", server.URL+"/binary", 99); err == nil {
+		if _, err := downloadReleaseBinary(RuntimeConfig{}, server.URL+"/binary", 99); err == nil {
 			t.Fatalf("expected size mismatch error")
 		}
 	})
@@ -341,7 +355,7 @@ func TestDownloadReleaseBinary(t *testing.T) {
 		}))
 		defer server.Close()
 
-		if _, err := downloadReleaseBinary(RuntimeConfig{}, server.URL+"/release", server.URL+"/binary", 0); err == nil {
+		if _, err := downloadReleaseBinary(RuntimeConfig{}, server.URL+"/binary", 0); err == nil {
 			t.Fatalf("expected oversized download to be rejected")
 		}
 	})
@@ -409,6 +423,8 @@ func TestCheckAndApplySelfUpdateRejectsSignedMetadataMismatch(t *testing.T) {
 }
 
 func TestMaybeAutoUpdateOnStartupRequestsRestart(t *testing.T) {
+	t.Setenv(envSelfUpdateAcceptUnsigned, "true")
+	t.Setenv(envSelfUpdateTrustedPublicKey, "")
 	t.Setenv(envAllowInsecureTransport, "true")
 	t.Setenv("LABTETHER_OUTBOUND_ALLOW_LOOPBACK", "true")
 
@@ -427,6 +443,8 @@ func TestMaybeAutoUpdateOnStartupRequestsRestart(t *testing.T) {
 		case "/release":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"version": "v2.0.0",
+				"os":      runtime.GOOS,
+				"arch":    runtime.GOARCH,
 				"sha256":  newSHA,
 				"url":     server.URL + "/binary",
 			})

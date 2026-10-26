@@ -7,7 +7,6 @@ import (
 	"github.com/labtether/labtether-linux/pkg/agentmgr"
 	"log"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -56,15 +55,16 @@ type DockerCollector struct {
 	discoveryTriggerCh    chan dockerDiscoveryTrigger
 	statsTriggerCh        chan struct{}
 
-	inventoryMu         sync.RWMutex
-	inventory           dockerInventorySnapshot
-	runningContainerIDs map[string]struct{}
-	hasPublishedFull    bool
+	inventoryMu       sync.RWMutex
+	inventory         dockerInventorySnapshot
+	runningContainers dockerRunningContainers
+	hasPublishedFull  bool
 
 	statsMu            sync.Mutex
 	statsSchedule      map[string]*dockerStatsSchedule
 	lastRunningSetHash string
 	lastStatsPublish   time.Time
+	statsCursor        string // last scheduled ID; rotate so hot containers cannot starve later IDs
 }
 
 // NewDockerCollector creates a collector. socketPath is the Docker socket path.
@@ -88,8 +88,7 @@ func NewDockerCollector(socketPath string, transport Transport, assetID string, 
 			Networks:   make(map[string]agentmgr.DockerNetworkInfo),
 			Volumes:    make(map[string]agentmgr.DockerVolumeInfo),
 		},
-		runningContainerIDs: make(map[string]struct{}),
-		statsSchedule:       make(map[string]*dockerStatsSchedule),
+		statsSchedule: make(map[string]*dockerStatsSchedule),
 	}
 }
 
@@ -337,7 +336,7 @@ func (dc *DockerCollector) refreshAndPublishContainerDelta(ctx context.Context) 
 	dc.inventoryMu.Lock()
 	dc.inventory.Containers = nextContainers
 	dc.inventory.ComposeStacks = cloneComposeStacks(nextCompose)
-	dc.runningContainerIDs = cloneStringSet(runningIDs)
+	dc.setRunningContainersLocked(runningIDs)
 	dc.inventoryMu.Unlock()
 	return true, nil
 }
@@ -371,30 +370,6 @@ func (dc *DockerCollector) sendDockerMessage(messageType string, payload any) er
 		return err
 	}
 	return nil
-}
-
-func (dc *DockerCollector) replaceInventory(snapshot dockerInventorySnapshot, runningIDs map[string]struct{}) {
-	dc.inventoryMu.Lock()
-	dc.inventory = snapshot
-	dc.runningContainerIDs = cloneStringSet(runningIDs)
-	dc.inventoryMu.Unlock()
-}
-
-func (dc *DockerCollector) updateRunningContainerIDs(runningIDs map[string]struct{}) {
-	dc.inventoryMu.Lock()
-	dc.runningContainerIDs = cloneStringSet(runningIDs)
-	dc.inventoryMu.Unlock()
-}
-
-func (dc *DockerCollector) currentRunningContainerIDs() []string {
-	dc.inventoryMu.RLock()
-	ids := make([]string, 0, len(dc.runningContainerIDs))
-	for containerID := range dc.runningContainerIDs {
-		ids = append(ids, containerID)
-	}
-	dc.inventoryMu.RUnlock()
-	sort.Strings(ids)
-	return ids
 }
 
 func (dc *DockerCollector) collectFullDiscovery(ctx context.Context) (agentmgr.DockerDiscoveryData, dockerInventorySnapshot, map[string]struct{}, error) {

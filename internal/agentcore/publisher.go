@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -108,6 +109,9 @@ func (p *apiHeartbeatPublisher) Publish(ctx context.Context, sample TelemetrySam
 		return fmt.Errorf("send heartbeat: %w", err)
 	}
 	defer resp.Body.Close()
+	// Read normal small acknowledgements so Go 1.26 can reuse the connection.
+	// A large or stalled response remains bounded by this cap and client timeout.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("heartbeat rejected with status %d", resp.StatusCode)

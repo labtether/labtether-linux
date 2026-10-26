@@ -33,6 +33,7 @@ type WebRTCSession struct {
 	desktopBackend string
 	sessionInfo    DesktopSessionInfo
 	inputBackend   string
+	inputGeometry  webRTCCaptureGeometry
 }
 
 func (s *WebRTCSession) close(reason string) {
@@ -63,7 +64,9 @@ func (s *WebRTCSession) close(reason string) {
 		}
 		RemoveProcessLog(s.videoLogPath)
 		RemoveProcessLog(s.audioLogPath)
-		close(s.done)
+		if s.done != nil {
+			close(s.done)
+		}
 	})
 }
 

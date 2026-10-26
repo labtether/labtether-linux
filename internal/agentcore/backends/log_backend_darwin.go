@@ -50,7 +50,7 @@ func (DarwinLogBackend) QueryEntries(req agentmgr.JournalQueryData) ([]agentmgr.
 	buffer := make([]timedLogEntry, 0, limit)
 
 	scanner := bufio.NewScanner(bytes.NewReader(out))
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	scanner.Buffer(nil, 256*1024) // Grow for long lines; keep idle streams small.
 	for scanner.Scan() {
 		entry, ok := ParseOSLogLine(scanner.Bytes())
 		if !ok {
@@ -102,7 +102,7 @@ func (DarwinLogBackend) StreamEntries(ctx context.Context, emit func(agentmgr.Lo
 	}
 
 	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	scanner.Buffer(nil, 256*1024) // Grow for long lines; keep idle streams small.
 	for scanner.Scan() {
 		select {
 		case <-ctx.Done():

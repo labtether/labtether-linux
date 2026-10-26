@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -24,12 +25,18 @@ import (
 type TerminalSession struct {
 	sessionID  string
 	Ptmx       *os.File
+	input      io.WriteCloser
+	output     io.ReadCloser
 	cmd        *exec.Cmd
+	done       chan struct{}
 	outputDone chan struct{}
+	closeOnce  sync.Once
 }
 
 const MaxTerminalSessions = 10
 const terminalOutputDrainTimeout = 2 * time.Second
+
+var StartTerminalPTY = pty.StartWithSize
 
 // TerminalManager manages PTY sessions on the agent.
 type TerminalManager struct {
@@ -83,7 +90,15 @@ func (tm *TerminalManager) HandleTerminalStart(transport MessageSender, msg agen
 		log.Printf("terminal: session %s already exists", req.SessionID)
 		return
 	}
+	reservation := &TerminalSession{sessionID: req.SessionID}
+	tm.Sessions[req.SessionID] = reservation
 	tm.Mu.Unlock()
+	defer tm.removeReservation(reservation)
+	failStart := func(reason string) {
+		if tm.removeReservation(reservation) {
+			SendTerminalClosed(transport, req.SessionID, reason)
+		}
+	}
 
 	// Find a shell
 	shell := req.Shell
@@ -111,7 +126,7 @@ func (tm *TerminalManager) HandleTerminalStart(transport MessageSender, msg agen
 			cmd, err = securityruntime.NewCommand(tmuxPath, "new-session", "-A", "-s", req.TmuxSession)
 			if err != nil {
 				log.Printf("terminal: tmux command blocked by runtime policy for session %s: %v", req.SessionID, err)
-				SendTerminalClosed(transport, req.SessionID, "failed to start tmux: "+err.Error())
+				failStart("failed to start tmux: " + err.Error())
 				return
 			}
 			tmuxAttached = true
@@ -120,7 +135,7 @@ func (tm *TerminalManager) HandleTerminalStart(transport MessageSender, msg agen
 			cmd, err = securityruntime.NewCommand(shell)
 			if err != nil {
 				log.Printf("terminal: shell command blocked by runtime policy for session %s: %v", req.SessionID, err)
-				SendTerminalClosed(transport, req.SessionID, "failed to start shell: "+err.Error())
+				failStart("failed to start shell: " + err.Error())
 				return
 			}
 		}
@@ -128,54 +143,86 @@ func (tm *TerminalManager) HandleTerminalStart(transport MessageSender, msg agen
 		cmd, err = securityruntime.NewCommand(shell)
 		if err != nil {
 			log.Printf("terminal: shell command blocked by runtime policy for session %s: %v", req.SessionID, err)
-			SendTerminalClosed(transport, req.SessionID, "failed to start shell: "+err.Error())
+			failStart("failed to start shell: " + err.Error())
 			return
 		}
 	}
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	cmd.Env = append(securityruntime.SanitizedChildEnv(), "TERM=xterm-256color")
 
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
-		Cols: uint16(cols),
-		Rows: uint16(rows),
+	ptmx, err := StartTerminalPTY(cmd, &pty.Winsize{
+		Cols: ClampUint16(cols),
+		Rows: ClampUint16(rows),
 	})
+	var input io.WriteCloser
+	var output io.ReadCloser
+	var pipeProcessDone <-chan error
+	if errors.Is(err, pty.ErrUnsupported) {
+		// creack/pty deliberately reports unsupported on Windows. Keep the
+		// terminal usable with a bounded stdin/stdout pipe bridge until a native
+		// ConPTY backend is available; process execution and input still pass
+		// through the same allowlist and authenticated agent channel.
+		input, output, pipeProcessDone, err = startPipeBackedTerminal(cmd)
+	}
 	if err != nil {
 		log.Printf("terminal: failed to start PTY for session %s: %v", req.SessionID, err)
-		SendTerminalClosed(transport, req.SessionID, "failed to start shell: "+err.Error())
+		failStart("failed to start shell: " + err.Error())
 		return
 	}
 
 	sess := &TerminalSession{
 		sessionID:  req.SessionID,
 		Ptmx:       ptmx,
+		input:      input,
+		output:     output,
 		cmd:        cmd,
+		done:       make(chan struct{}),
 		outputDone: make(chan struct{}),
 	}
 
 	tm.Mu.Lock()
+	if tm.Sessions[req.SessionID] != reservation {
+		tm.Mu.Unlock()
+		sess.terminate()
+		if pipeProcessDone == nil {
+			_ = cmd.Wait()
+		}
+		return
+	}
 	tm.Sessions[req.SessionID] = sess
 	tm.Mu.Unlock()
 
 	// Notify hub that terminal is ready
 	sendTerminalStartedWithTmux(transport, req.SessionID, tmuxAttached)
 
-	// Stream PTY output → hub
+	// Stream PTY output → hub. The streamOutput goroutine is responsible
+	// for final teardown once its Read loop exits naturally (on EOF/EIO
+	// after the child closes its slave PTY). Closing Ptmx elsewhere while
+	// streamOutput is still reading causes "file already closed" errors
+	// and loses any buffered output, which breaks large-output tests.
 	go func() {
 		defer close(sess.outputDone)
 		tm.streamOutput(transport, sess)
+		if tm.cleanupSession(sess) {
+			SendTerminalClosed(transport, req.SessionID, "shell exited")
+		}
 	}()
 
-	// Wait for process exit, then let the PTY reader drain the child's final
-	// output before closing the descriptor and notifying the hub.
+	// Wait for process exit, preserving normal final output before bounding
+	// a descendant that keeps the terminal open after its shell has exited.
 	go func() {
-		_ = cmd.Wait()
+		if pipeProcessDone != nil {
+			_ = <-pipeProcessDone
+		} else {
+			_ = cmd.Wait()
+		}
+		close(sess.done)
 		select {
 		case <-sess.outputDone:
 		case <-time.After(terminalOutputDrainTimeout):
-			_ = sess.Ptmx.Close()
-			<-sess.outputDone
+			// A background child may retain the slave PTY after the shell exits.
+			// Give normal output time to drain, then release the orphaned stream.
+			sess.close()
 		}
-		tm.cleanup(req.SessionID)
-		SendTerminalClosed(transport, req.SessionID, "shell exited")
 	}()
 }
 
@@ -198,7 +245,7 @@ func (tm *TerminalManager) HandleTerminalData(msg agentmgr.Message) {
 		return
 	}
 
-	_, _ = sess.Ptmx.Write(decoded)
+	_, _ = sess.writeWithTimeout(decoded, 5*time.Second)
 }
 
 // HandleTerminalResize changes the PTY window size.
@@ -215,7 +262,7 @@ func (tm *TerminalManager) HandleTerminalResize(msg agentmgr.Message) {
 		return
 	}
 
-	if req.Cols > 0 && req.Rows > 0 {
+	if sess.Ptmx != nil && req.Cols > 0 && req.Rows > 0 {
 		_ = pty.Setsize(sess.Ptmx, &pty.Winsize{
 			Cols: ClampUint16(req.Cols),
 			Rows: ClampUint16(req.Rows),
@@ -247,11 +294,12 @@ func (tm *TerminalManager) HandleTerminalClose(msg agentmgr.Message) {
 		return
 	}
 
-	// Close PTY — this will cause the shell process to exit
-	_ = sess.Ptmx.Close()
-	if sess.cmd.Process != nil {
-		_ = sess.cmd.Process.Kill()
+	if sess.cmd == nil {
+		tm.removeReservation(sess)
+		return
 	}
+	// Keep the active slot until its output reader sends the close event.
+	sess.terminate()
 }
 
 func (tm *TerminalManager) HandleTerminalTmuxKill(transport MessageSender, msg agentmgr.Message) {
@@ -294,13 +342,7 @@ func (tm *TerminalManager) HandleTerminalTmuxKill(transport MessageSender, msg a
 		return
 	}
 
-	timeout := DefaultCommandTimeout
-	if req.Timeout > 0 {
-		timeout = time.Duration(req.Timeout) * time.Second
-	}
-	if timeout > MaxRemoteCommandTimeout {
-		timeout = MaxRemoteCommandTimeout
-	}
+	timeout := remoteCommandTimeoutFromSeconds(req.Timeout)
 
 	checkCtx, checkCancel := context.WithTimeout(context.Background(), timeout)
 	defer checkCancel()
@@ -310,7 +352,7 @@ func (tm *TerminalManager) HandleTerminalTmuxKill(transport MessageSender, msg a
 		sendResult("failed", err.Error())
 		return
 	}
-	if output, err := checkCmd.CombinedOutput(); err != nil {
+	if output, err := securityruntime.CaptureCombinedOutput(checkCmd, MaxCommandOutputBytes); err != nil {
 		trimmed := TruncateCommandOutput(output, MaxCommandOutputBytes)
 		if checkCtx.Err() == context.DeadlineExceeded {
 			sendResult("failed", "tmux session check timed out")
@@ -336,7 +378,7 @@ func (tm *TerminalManager) HandleTerminalTmuxKill(transport MessageSender, msg a
 		sendResult("failed", err.Error())
 		return
 	}
-	output, err := killCmd.CombinedOutput()
+	output, err := securityruntime.CaptureCombinedOutput(killCmd, MaxCommandOutputBytes)
 	if err != nil {
 		trimmed := TruncateCommandOutput(output, MaxCommandOutputBytes)
 		if killCtx.Err() == context.DeadlineExceeded {
@@ -350,54 +392,6 @@ func (tm *TerminalManager) HandleTerminalTmuxKill(transport MessageSender, msg a
 		return
 	}
 	sendResult("succeeded", TruncateCommandOutput(output, MaxCommandOutputBytes))
-}
-
-// CloseAll terminates all active sessions (called on agent shutdown).
-func (tm *TerminalManager) CloseAll() {
-	tm.Mu.Lock()
-	defer tm.Mu.Unlock()
-	for id, sess := range tm.Sessions {
-		_ = sess.Ptmx.Close()
-		if sess.cmd.Process != nil {
-			_ = sess.cmd.Process.Kill()
-		}
-		delete(tm.Sessions, id)
-	}
-}
-
-// streamOutput reads from the PTY and sends output to the hub.
-func (tm *TerminalManager) streamOutput(transport MessageSender, sess *TerminalSession) {
-	buf := make([]byte, 4096)
-	for {
-		n, err := sess.Ptmx.Read(buf)
-		if n > 0 {
-			encoded := base64.StdEncoding.EncodeToString(buf[:n])
-			data, _ := json.Marshal(agentmgr.TerminalDataPayload{
-				SessionID: sess.sessionID,
-				Data:      encoded,
-			})
-			_ = transport.Send(agentmgr.Message{
-				Type: agentmgr.MsgTerminalData,
-				ID:   sess.sessionID,
-				Data: data,
-			})
-		}
-		if err != nil {
-			if err != io.EOF {
-				log.Printf("terminal: read error for session %s: %v", sess.sessionID, err)
-			}
-			return
-		}
-	}
-}
-
-func (tm *TerminalManager) cleanup(sessionID string) {
-	tm.Mu.Lock()
-	defer tm.Mu.Unlock()
-	if sess, ok := tm.Sessions[sessionID]; ok {
-		_ = sess.Ptmx.Close()
-		delete(tm.Sessions, sessionID)
-	}
 }
 
 func sendTerminalStartedWithTmux(transport MessageSender, sessionID string, tmuxAttached bool) {
@@ -423,6 +417,15 @@ func SendTerminalClosed(transport MessageSender, sessionID, reason string) {
 
 // DetectShell finds the best available shell on the system.
 func DetectShell() string {
+	if runtime.GOOS == "windows" {
+		for _, shell := range shellCandidatesForOS(runtime.GOOS) {
+			if path, err := exec.LookPath(shell); err == nil {
+				return path
+			}
+		}
+		return "cmd.exe"
+	}
+
 	// Prefer the user's configured shell (SHELL env var).
 	if userShell := os.Getenv("SHELL"); userShell != "" {
 		// #nosec G703 -- local SHELL env is trusted runtime input on the managed node.
@@ -436,15 +439,18 @@ func DetectShell() string {
 			return shell
 		}
 	}
-	// Fallback: try PATH lookup
-	if path, err := exec.LookPath("zsh"); err == nil {
-		return path
-	}
-	if path, err := exec.LookPath("bash"); err == nil {
-		return path
-	}
-	if path, err := exec.LookPath("sh"); err == nil {
-		return path
+	// Fallback: try PATH lookup.
+	for _, shell := range shellCandidatesForOS(runtime.GOOS) {
+		if path, err := exec.LookPath(shell); err == nil {
+			return path
+		}
 	}
 	return "/bin/sh"
+}
+
+func shellCandidatesForOS(goos string) []string {
+	if goos == "windows" {
+		return []string{"pwsh.exe", "powershell.exe", "cmd.exe"}
+	}
+	return []string{"zsh", "bash", "sh"}
 }

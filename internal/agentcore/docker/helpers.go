@@ -36,28 +36,29 @@ func (dc *DockerCollector) HasClient() bool {
 func NewTestCollector(endpoint string, transport Transport, assetID string) *DockerCollector {
 	client := NewDockerClient(endpoint)
 	return &DockerCollector{
-		client:              client,
-		transport:           transport,
-		socketPath:          endpoint,
-		assetID:             assetID,
-		interval:            defaultDockerDiscoveryInterval,
+		client:                client,
+		transport:             transport,
+		socketPath:            endpoint,
+		assetID:               assetID,
+		interval:              defaultDockerDiscoveryInterval,
 		fullReconcileInterval: deriveDockerFullReconcileInterval(defaultDockerDiscoveryInterval),
-		discoveryTriggerCh:  make(chan dockerDiscoveryTrigger, 32),
-		statsTriggerCh:      make(chan struct{}, 4),
+		discoveryTriggerCh:    make(chan dockerDiscoveryTrigger, 32),
+		statsTriggerCh:        make(chan struct{}, 4),
 		inventory: dockerInventorySnapshot{
 			Containers: make(map[string]agentmgr.DockerContainerInfo),
 			Images:     make(map[string]agentmgr.DockerImageInfo),
 			Networks:   make(map[string]agentmgr.DockerNetworkInfo),
 			Volumes:    make(map[string]agentmgr.DockerVolumeInfo),
 		},
-		runningContainerIDs: make(map[string]struct{}),
-		statsSchedule:       make(map[string]*dockerStatsSchedule),
+		statsSchedule: make(map[string]*dockerStatsSchedule),
 	}
 }
 
 // SetTestHTTPClient overrides the HTTP client on the collector's docker client.
 // Used for testing with httptest.NewTLSServer.
-func (dc *DockerCollector) SetTestHTTPClient(c interface{ Do(*http.Request) (*http.Response, error) }) {
+func (dc *DockerCollector) SetTestHTTPClient(c interface {
+	Do(*http.Request) (*http.Response, error)
+}) {
 	if hc, ok := c.(*http.Client); ok {
 		dc.client.httpClient = hc
 	}
@@ -86,7 +87,7 @@ func (dc *DockerCollector) SetTestInventoryState(published bool, containers map[
 	dc.inventory.Containers = containers
 	dc.inventory.Images = images
 	dc.hasPublishedFull = published
-	dc.runningContainerIDs = runningIDs
+	dc.setRunningContainersLocked(runningIDs)
 	dc.inventoryMu.Unlock()
 }
 

@@ -59,6 +59,19 @@ go build -o labtether-agent ./cmd/labtether-agent/
 Most users should grab the pre-built binary from the canonical
 [`labtether-agent` releases](https://github.com/labtether/labtether-agent/releases/latest).
 
+### Updates for compatibility builds
+
+Self-updates require `LABTETHER_AUTO_UPDATE_TRUSTED_PUBLIC_KEY` and signed
+metadata. A missing key stops the update. The compatibility signature still
+includes the resolved download URL; it is not the canonical agent's signature
+format. `LABTETHER_AUTO_UPDATE_ACCEPT_UNSIGNED=true` is an explicit opt-in for
+development only and does not bypass a configured key.
+
+Update metadata is limited to 1 MiB. Releases must match the running OS and
+architecture and use a stable version. Older versions are rejected even for a
+forced update. Hub tokens are sent only to the configured Hub origin, never to
+a separate update mirror or a redirect on another origin.
+
 ## Links
 
 | | |
