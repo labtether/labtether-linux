@@ -385,7 +385,7 @@ func TestDetectWebRTCCapabilitiesCollectsEncodersAudioAndDisplays(t *testing.T) 
 			t.Fatal("expected gst element argument")
 		}
 		switch args[0] {
-		case "nvh264enc", "vp8enc", "pipewiresrc", "pulsesrc":
+		case "nvh264enc", "vp8enc", "pipewiresrc", "pulsesrc", "-version":
 			return exec.Command("/bin/sh", "-c", "exit 0"), nil
 		default:
 			return exec.Command("/bin/sh", "-c", "exit 1"), nil
