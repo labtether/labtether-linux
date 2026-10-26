@@ -57,7 +57,11 @@ func HandleCommandRequest(transport MessageSender, msg agentmgr.Message, cfg Exe
 
 	timeout := remoteCommandTimeoutFromSeconds(req.Timeout)
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	commandCtx := context.Background()
+	if owner, ok := transport.(interface{ Context() context.Context }); ok {
+		commandCtx = owner.Context()
+	}
+	ctx, cancel := context.WithTimeout(commandCtx, timeout)
 	defer cancel()
 
 	cmd, err := securityruntime.NewValidatedShellCommandContext(ctx, req.Command)
@@ -66,19 +70,9 @@ func HandleCommandRequest(transport MessageSender, msg agentmgr.Message, cfg Exe
 		sendCommandResult(transport, req, "failed", err.Error())
 		return
 	}
-	output := securityruntime.NewCappedRetainingWriter(MaxCommandOutputBytes)
-	cmd.Stdout = output
-	cmd.Stderr = output
-	err = cmd.Run()
-
-	// Force-kill if the process survived the context timeout.
-	if ctx.Err() == context.DeadlineExceeded && cmd.Process != nil {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-	}
+	outputStr, err := runRemoteCommandOutput(cmd)
 
 	status := "succeeded"
-	outputStr := retainedCommandOutput(output)
 	if ctx.Err() == context.DeadlineExceeded {
 		status = "failed"
 		if outputStr != "" {
@@ -218,9 +212,12 @@ func HandleUpdateRequest(transport MessageSender, msg agentmgr.Message, cfg Exec
 	if pkgCmd == "apt-get" {
 		cmd.Env = append(cmd.Environ(), "DEBIAN_FRONTEND=noninteractive")
 	}
-	output, err := cmd.CombinedOutput()
-	outputStr := TruncateCommandOutput(output, MaxCommandOutputBytes)
+	outputStr, err := runRemoteCommandOutput(cmd)
 
+	if ctx.Err() == context.DeadlineExceeded {
+		sendResult("failed", outputStr, "update timed out")
+		return
+	}
 	if err != nil {
 		sendResult("failed", outputStr, err.Error())
 		return

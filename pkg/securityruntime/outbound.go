@@ -315,9 +315,7 @@ func DoOutboundRequest(client *http.Client, req *http.Request) (*http.Response, 
 	if _, err := ValidateOutboundURL(req.URL.String()); err != nil {
 		return nil, err
 	}
-	if client == nil {
-		client = http.DefaultClient
-	}
+	client = secureOutboundHTTPClient(client, strings.ToLower(strings.TrimSpace(req.URL.Scheme)))
 	// #nosec G704 -- request URL host/scheme validated by ValidateOutboundURL allowlist policy.
 	return client.Do(req)
 }

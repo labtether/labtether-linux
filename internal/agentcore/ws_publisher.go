@@ -33,6 +33,9 @@ func newWSHeartbeatPublisher(transport *wsTransport, httpFallback HeartbeatPubli
 }
 
 func (p *wsHeartbeatPublisher) Publish(ctx context.Context, sample TelemetrySample) error {
+	if p.transport.EnrollmentPending() {
+		return nil
+	}
 	if !p.transport.Connected() {
 		if p.httpFallback != nil {
 			return p.httpFallback.Publish(ctx, sample)

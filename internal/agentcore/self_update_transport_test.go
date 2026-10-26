@@ -68,7 +68,7 @@ func TestSelfUpdateTLSMetadataAndBinaryAudience(t *testing.T) {
 			defer server.Close()
 			release = agentReleaseMetadata{Version: "v2.0.0", OS: runtime.GOOS, Arch: runtime.GOARCH,
 				SHA256: sha256Hex(binary), URL: server.URL + "/binary", SizeBytes: int64(len(binary))}
-			release.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, []byte(selfUpdateSignaturePayload(release, release.URL))))
+			release.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, []byte(selfUpdateSignaturePayload(release))))
 			cfg := selfUpdateTLSConfig(t, server)
 			cfg.APIToken = "dummy-hub-token"
 			cfg.APIBaseURL = "https://hub.example.invalid"

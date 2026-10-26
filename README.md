@@ -62,15 +62,32 @@ Most users should grab the pre-built binary from the canonical
 ### Updates for compatibility builds
 
 Self-updates require `LABTETHER_AUTO_UPDATE_TRUSTED_PUBLIC_KEY` and signed
-metadata. A missing key stops the update. The compatibility signature still
-includes the resolved download URL; it is not the canonical agent's signature
-format. `LABTETHER_AUTO_UPDATE_ACCEPT_UNSIGNED=true` is an explicit opt-in for
-development only and does not bypass a configured key.
+metadata. A missing key stops the update. Signatures use the canonical
+agent's payload (version, OS, architecture, SHA-256 and size), so canonical
+release signatures verify here. `LABTETHER_AUTO_UPDATE_ACCEPT_UNSIGNED=true` is
+an explicit opt-in for development only and does not bypass a configured key.
 
 Update metadata is limited to 1 MiB. Releases must match the running OS and
 architecture and use a stable version. Older versions are rejected even for a
 forced update. Hub tokens are sent only to the configured Hub origin, never to
 a separate update mirror or a redirect on another origin.
+
+## Linux WebRTC input prerequisites
+
+X11 control requires `xdotool` and `xmodmap` in addition to the desktop capture
+stack. Install `x11-xserver-utils` on Debian/Ubuntu, `xorg-xmodmap` on Arch, or
+`xmodmap` on Fedora, openSUSE and Alpine. Missing or failed keymap tools leave
+X11 WebRTC control unavailable.
+
+The agent reads the current X11 keymap for each new key press. Repeats, release
+and disconnect cleanup use the physical key number saved for that press.
+This keeps a layout change from redirecting cleanup and lets controllers share
+held keys without releasing each other's holds. Keys absent from the server
+keymap fail explicitly; the agent does not change the keymap or add implicit
+modifier presses. A bounded internal XTEST helper sends keys without changing
+the active XKB layout group. A custom `LABTETHER_EXEC_ALLOWED_BINARIES` list
+must permit `labtether-x11-input` as well as `xdotool` and `xmodmap`; the default
+policy already allows all three.
 
 ## Links
 

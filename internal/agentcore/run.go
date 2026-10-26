@@ -141,8 +141,7 @@ func Run(ctx context.Context, cfg RuntimeConfig, provider TelemetryProvider) err
 		runtime.telemetryBuf = telemetryBuf
 		runtime.deviceIdentity = identity
 
-		// Docker and web service collectors: declared here (before reconnect loop)
-		// so the onConnect closure can reference them for state resets.
+		// Docker and web service collectors are wired before the reconnect callback.
 		var dockerCollector *dockerpkg.DockerCollector
 		var execMgr *dockerpkg.DockerExecManager
 		var dockerLogMgr *dockerpkg.DockerLogManager
@@ -155,24 +154,6 @@ func Run(ctx context.Context, cfg RuntimeConfig, provider TelemetryProvider) err
 		deskMgr := newDesktopManager(dispMgr)
 		fileMgr := files.NewManager(cfg.FileRootMode)
 		webrtcMgr := newWebRTCManager(webrtcCaps, runtime, fileMgr, dispMgr)
-
-		// Start reconnect loop in background.
-		go transport.reconnectLoop(ctx, func() {
-			replayBufferedTelemetry(transport, telemetryBuf)
-			sendWebRTCCapabilities(transport, webrtcCaps)
-			sendAgentSettingsState(transport, runtime, time.Now().UTC().Format(time.RFC3339Nano))
-			if dockerCollector != nil {
-				dockerCollector.ResetPublishedState()
-			}
-			if webServiceCollector != nil {
-				webServiceCollector.ResetPublishedState()
-			}
-			// Close stale sessions from the previous connection — the hub
-			// has no knowledge of them after reconnect.
-			termMgr.CloseAll()
-			deskMgr.CloseAll()
-			webrtcMgr.CloseAll()
-		})
 
 		// Load persisted config overrides from disk.
 		loadPersistedConfig(runtime)
@@ -228,6 +209,35 @@ func Run(ctx context.Context, cfg RuntimeConfig, provider TelemetryProvider) err
 		go webServiceCollector.Run(ctx)
 		log.Printf("%s: Web service collector enabled (host IP: %s)", cfg.Name, hostIP)
 
+		// All managers and collectors are fully initialized before the reconnect
+		// callback can read them or reset their state.
+		// Start reconnect loop in background.
+		transport.beforeConnect = func() {
+			termMgr.CloseAll()
+			deskMgr.CloseAll()
+			webrtcMgr.CloseAll()
+			audioMgr.CloseAll()
+			fileMgr.CloseAll()
+			if execMgr != nil {
+				execMgr.CloseAll()
+			}
+			if dockerLogMgr != nil {
+				dockerLogMgr.CloseAll()
+			}
+		}
+		go transport.reconnectLoop(ctx, func() {
+			replayBufferedTelemetry(transport, telemetryBuf)
+			sendWebRTCCapabilities(transport, webrtcCaps)
+			sendAgentSettingsState(transport, runtime, time.Now().UTC().Format(time.RFC3339Nano))
+			if dockerCollector != nil {
+				dockerCollector.ResetPublishedState()
+			}
+			if webServiceCollector != nil {
+				webServiceCollector.ResetPublishedState()
+			}
+
+		})
+
 		go receiveLoop(ctx, transport, cfg, runtime, termMgr, deskMgr, webrtcMgr, fileMgr, processMgr, serviceMgr, journalMgr, diskMgr, networkMgr, packageMgr, cronMgr, usersMgr, clipMgr, audioMgr, dockerCollector, webServiceCollector, execMgr, dockerLogMgr)
 
 		// Start log producer — runs independently of receiveLoop, pushing
@@ -249,25 +259,6 @@ func Run(ctx context.Context, cfg RuntimeConfig, provider TelemetryProvider) err
 	runtime := NewRuntime(cfg, provider, publisher)
 	runtime.deviceIdentity = identity
 	return runtime.Run(ctx)
-}
-
-func replayBufferedTelemetry(transport *wsTransport, telemetryBuf *RingBuffer[TelemetrySample]) {
-	if transport == nil || telemetryBuf == nil {
-		return
-	}
-
-	buffered := telemetryBuf.Drain()
-	if len(buffered) == 0 {
-		return
-	}
-
-	log.Printf("agentws: replaying %d buffered telemetry samples", len(buffered))
-	for _, sample := range buffered {
-		if assetID := transport.AssetID(); assetID != "" {
-			sample.AssetID = assetID
-		}
-		sendTelemetrySample(transport, sample)
-	}
 }
 
 func sendWebRTCCapabilities(transport *wsTransport, caps agentmgr.WebRTCCapabilitiesData) {

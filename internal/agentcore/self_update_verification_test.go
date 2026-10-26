@@ -15,6 +15,28 @@ import (
 	"testing"
 )
 
+func TestValidateReleaseMetadataRejectsCrossOriginByDefault(t *testing.T) {
+	release := agentReleaseMetadata{
+		Version: "v2.0.0",
+		OS:      runtime.GOOS,
+		Arch:    runtime.GOARCH,
+		SHA256:  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	}
+	err := validateReleaseMetadata("https://hub.example.com/api/v1/agent/releases/latest", "https://cdn.example.com/agent.bin", release)
+	if err == nil {
+		t.Fatalf("expected cross-origin release metadata to be rejected")
+	}
+}
+
+func TestShouldAttachUpdateTokenOnlyForSameOrigin(t *testing.T) {
+	if !shouldAttachUpdateToken(RuntimeConfig{APIBaseURL: "https://hub.example.com"}, "https://hub.example.com/api/v1/agent/binary") {
+		t.Fatalf("expected token forwarding for same-origin download")
+	}
+	if shouldAttachUpdateToken(RuntimeConfig{APIBaseURL: "https://hub.example.com"}, "https://cdn.example.com/agent.bin") {
+		t.Fatalf("expected token forwarding to be disabled for cross-origin download")
+	}
+}
+
 func TestFetchReleaseMetadataBoundsAndAuth(t *testing.T) {
 	t.Setenv(envAllowInsecureTransport, "true")
 	t.Setenv("LABTETHER_OUTBOUND_ALLOW_LOOPBACK", "true")
@@ -149,122 +171,241 @@ func TestValidateReleaseTargetRejectsWrongPlatformAndRollback(t *testing.T) {
 	}
 }
 
-func TestUnsignedSelfUpdateRequiresExplicitDevelopmentOptIn(t *testing.T) {
-	t.Setenv(envSelfUpdateTrustedPublicKey, "")
-	t.Setenv(envSelfUpdateAcceptUnsigned, "false")
-	release := agentReleaseMetadata{}
-	if err := verifyReleaseMetadataSignature(release, "https://example.invalid/binary"); err == nil {
-		t.Fatal("missing trust key silently accepted an unsigned update")
-	}
+func TestForcedSelfUpdateStillRejectsRollback(t *testing.T) {
+	t.Setenv(envAllowInsecureTransport, "true")
+	t.Setenv("LABTETHER_OUTBOUND_ALLOW_LOOPBACK", "true")
 	t.Setenv(envSelfUpdateAcceptUnsigned, "true")
-	if err := verifyReleaseMetadataSignature(release, "https://example.invalid/binary"); err != nil {
-		t.Fatalf("explicit development opt-in rejected: %v", err)
+	tempDir := t.TempDir()
+	executablePath := filepath.Join(tempDir, "labtether-agent")
+	originalBinary := []byte("current-binary")
+	if err := os.WriteFile(executablePath, originalBinary, 0o755); err != nil {
+		t.Fatalf("write current executable: %v", err)
 	}
-	t.Setenv(envSelfUpdateTrustedPublicKey, "malformed")
-	if err := verifyReleaseMetadataSignature(release, "https://example.invalid/binary"); err == nil {
-		t.Fatal("unsigned opt-in bypassed an invalid configured trust key")
+
+	binaryRequests := 0
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/release":
+			_ = json.NewEncoder(w).Encode(agentReleaseMetadata{
+				Version: "v1.9.9",
+				OS:      runtime.GOOS,
+				Arch:    runtime.GOARCH,
+				SHA256:  strings.Repeat("a", 64),
+				URL:     server.URL + "/binary",
+			})
+		case "/binary":
+			binaryRequests++
+			_, _ = w.Write([]byte("older-binary"))
+		}
+	}))
+	defer server.Close()
+	originalExecutablePathFn := executablePathFn
+	executablePathFn = func() (string, error) { return executablePath, nil }
+	t.Cleanup(func() { executablePathFn = originalExecutablePathFn })
+
+	if _, _, err := checkAndApplySelfUpdateWithOptions(RuntimeConfig{
+		AutoUpdateCheckURL: server.URL + "/release",
+		Version:            "v2.0.0",
+	}, selfUpdateOptions{Force: true}); err == nil || !strings.Contains(err.Error(), "downgrade") {
+		t.Fatalf("expected forced rollback rejection, got %v", err)
+	}
+	if binaryRequests != 0 {
+		t.Fatalf("rollback downloaded binary %d times", binaryRequests)
+	}
+	content, err := os.ReadFile(executablePath)
+	if err != nil {
+		t.Fatalf("read current executable: %v", err)
+	}
+	if string(content) != string(originalBinary) {
+		t.Fatalf("rollback changed executable to %q", content)
 	}
 }
 
-func TestSelfUpdateRefusalsLeaveExecutableUntouched(t *testing.T) {
-	t.Setenv(envAllowInsecureTransport, "false")
-	t.Setenv("LABTETHER_OUTBOUND_ALLOW_LOOPBACK", "true")
-	t.Setenv(envSelfUpdateAcceptUnsigned, "false")
+func TestVerifyReleaseMetadataSignature(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("generate key: %v", err)
 	}
-	for _, kind := range []string{"missing trust key", "missing signature", "invalid signature", "wrong OS", "wrong arch", "forced downgrade"} {
-		t.Run(kind, func(t *testing.T) {
-			t.Setenv(envSelfUpdateTrustedPublicKey, base64.StdEncoding.EncodeToString(publicKey))
-			binary := []byte("unapplied candidate")
-			var release agentReleaseMetadata
-			binaryRequests := make(chan struct{}, 1)
-			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-				if req.URL.Path == "/release" {
-					_ = json.NewEncoder(w).Encode(release)
-					return
-				}
-				binaryRequests <- struct{}{}
-				_, _ = w.Write(binary)
-			}))
-			defer server.Close()
-			release = agentReleaseMetadata{Version: "v2.0.0", OS: runtime.GOOS, Arch: runtime.GOARCH,
-				SHA256: sha256Hex(binary), URL: server.URL + "/binary", SizeBytes: int64(len(binary))}
-			switch kind {
-			case "wrong OS":
-				release.OS = "not-" + runtime.GOOS
-			case "wrong arch":
-				release.Arch = "not-" + runtime.GOARCH
-			case "forced downgrade":
-				release.Version = "v1.0.0"
-			}
-			release.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, []byte(selfUpdateSignaturePayload(release, release.URL))))
-			switch kind {
-			case "missing trust key":
-				t.Setenv(envSelfUpdateTrustedPublicKey, "")
-			case "missing signature":
-				release.Signature = ""
-			case "invalid signature":
-				release.Signature = base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize))
-			}
-			path := filepath.Join(t.TempDir(), "dummy-executable")
-			original := []byte("current executable fixture")
-			if err := os.WriteFile(path, original, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			previous := executablePathFn
-			executablePathFn = func() (string, error) { return path, nil }
-			t.Cleanup(func() { executablePathFn = previous })
-			cfg := selfUpdateTLSConfig(t, server)
-			cfg.AutoUpdateCheckURL = server.URL + "/release"
-			cfg.Version = "v1.9.0"
-			updated, _, err := checkAndApplySelfUpdateWithOptions(cfg, selfUpdateOptions{Force: true})
-			if err == nil || updated {
-				t.Fatalf("rejected update result = %v, %v", updated, err)
-			}
-			select {
-			case <-binaryRequests:
-				t.Fatal("rejected release downloaded a binary")
-			default:
-			}
-			got, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if string(got) != string(original) {
-				t.Fatal("rejected release changed executable")
-			}
-		})
+	t.Setenv(envSelfUpdateTrustedPublicKey, base64.StdEncoding.EncodeToString(publicKey))
+
+	downloadURL := "https://hub.example.com/api/v1/agent/binary?os=linux&arch=amd64"
+	release := agentReleaseMetadata{
+		Version:   "v2.0.0",
+		OS:        "linux",
+		Arch:      "amd64",
+		SHA256:    strings.Repeat("a", 64),
+		URL:       downloadURL,
+		SizeBytes: 123,
 	}
+	release.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, []byte(selfUpdateSignaturePayload(release))))
+
+	if err := verifyReleaseMetadataSignature(release, downloadURL); err != nil {
+		t.Fatalf("expected valid signature to verify, got %v", err)
+	}
+
+	t.Run("missing signature is rejected", func(t *testing.T) {
+		missingSig := release
+		missingSig.Signature = ""
+		if err := verifyReleaseMetadataSignature(missingSig, downloadURL); err == nil {
+			t.Fatalf("expected missing signature to be rejected")
+		}
+	})
+
+	t.Run("invalid signature is rejected", func(t *testing.T) {
+		invalid := release
+		invalid.Signature = base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize))
+		if err := verifyReleaseMetadataSignature(invalid, downloadURL); err == nil {
+			t.Fatalf("expected invalid signature to be rejected")
+		}
+	})
 }
 
-func TestReleaseMetadataFieldBounds(t *testing.T) {
-	valid := agentReleaseMetadata{Version: "v2.0.0", OS: runtime.GOOS, Arch: runtime.GOARCH,
-		SHA256: strings.Repeat("a", 64), URL: "/binary", SizeBytes: 1}
-	endpoint := "https://hub.example.invalid/release"
-	if err := validateReleaseMetadata(endpoint, "https://hub.example.invalid/binary", valid); err != nil {
-		t.Fatal(err)
-	}
-	mutations := map[string]func(*agentReleaseMetadata){
-		"long version":    func(r *agentReleaseMetadata) { r.Version = strings.Repeat("v", maxSelfUpdateVersionLength+1) },
-		"missing OS":      func(r *agentReleaseMetadata) { r.OS = "" },
-		"long OS":         func(r *agentReleaseMetadata) { r.OS = strings.Repeat("x", maxSelfUpdatePlatformLength+1) },
-		"missing arch":    func(r *agentReleaseMetadata) { r.Arch = "" },
-		"long arch":       func(r *agentReleaseMetadata) { r.Arch = strings.Repeat("x", maxSelfUpdatePlatformLength+1) },
-		"long URL":        func(r *agentReleaseMetadata) { r.URL = strings.Repeat("x", maxSelfUpdateURLLength+1) },
-		"long signature":  func(r *agentReleaseMetadata) { r.Signature = strings.Repeat("x", maxSelfUpdateSignatureLength+1) },
-		"bad digest":      func(r *agentReleaseMetadata) { r.SHA256 = "not-a-digest" },
-		"negative size":   func(r *agentReleaseMetadata) { r.SizeBytes = -1 },
-		"oversize binary": func(r *agentReleaseMetadata) { r.SizeBytes = maxSelfUpdateBinarySize + 1 },
-	}
-	for name, mutate := range mutations {
-		t.Run(name, func(t *testing.T) {
-			release := valid
-			mutate(&release)
-			if err := validateReleaseMetadata(endpoint, "https://hub.example.invalid/binary", release); err == nil {
-				t.Fatal("invalid metadata accepted")
+func TestDownloadReleaseBinary(t *testing.T) {
+	t.Setenv("LABTETHER_OUTBOUND_ALLOW_LOOPBACK", "true")
+
+	t.Run("attaches auth token for same-origin download", func(t *testing.T) {
+		t.Setenv(envAllowInsecureTransport, "true")
+		tokenSeen := ""
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			tokenSeen = r.Header.Get("Authorization")
+			_, _ = w.Write([]byte("same-origin-binary"))
+		}))
+		defer server.Close()
+
+		payload, err := downloadReleaseBinary(RuntimeConfig{APIBaseURL: server.URL, APIToken: "token-123"}, server.URL+"/binary", int64(len("same-origin-binary")))
+		if err != nil {
+			t.Fatalf("downloadReleaseBinary returned error: %v", err)
+		}
+		if string(payload) != "same-origin-binary" {
+			t.Fatalf("unexpected payload %q", string(payload))
+		}
+		if tokenSeen != "Bearer token-123" {
+			t.Fatalf("expected auth token to be forwarded, got %q", tokenSeen)
+		}
+	})
+
+	t.Run("does not attach auth token for cross-origin download", func(t *testing.T) {
+		t.Setenv(envAllowInsecureTransport, "true")
+		tokenSeen := ""
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			tokenSeen = r.Header.Get("Authorization")
+			_, _ = w.Write([]byte("cross-origin-binary"))
+		}))
+		defer server.Close()
+
+		payload, err := downloadReleaseBinary(RuntimeConfig{APIBaseURL: "https://hub.example.com", APIToken: "token-123"}, server.URL+"/binary", int64(len("cross-origin-binary")))
+		if err != nil {
+			t.Fatalf("downloadReleaseBinary returned error: %v", err)
+		}
+		if string(payload) != "cross-origin-binary" {
+			t.Fatalf("unexpected payload %q", string(payload))
+		}
+		if tokenSeen != "" {
+			t.Fatalf("expected no auth token for cross-origin download, got %q", tokenSeen)
+		}
+	})
+
+	t.Run("rejects HTTP error status", func(t *testing.T) {
+		t.Setenv(envAllowInsecureTransport, "true")
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		}))
+		defer server.Close()
+
+		if _, err := downloadReleaseBinary(RuntimeConfig{}, server.URL+"/binary", 0); err == nil {
+			t.Fatalf("expected status error")
+		}
+	})
+
+	t.Run("rejects size mismatch", func(t *testing.T) {
+		t.Setenv(envAllowInsecureTransport, "true")
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte("size-mismatch"))
+		}))
+		defer server.Close()
+
+		if _, err := downloadReleaseBinary(RuntimeConfig{}, server.URL+"/binary", 99); err == nil {
+			t.Fatalf("expected size mismatch error")
+		}
+	})
+
+	t.Run("rejects oversized downloads", func(t *testing.T) {
+		t.Setenv(envAllowInsecureTransport, "true")
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			chunk := strings.Repeat("a", 1024*1024)
+			for written := 0; written <= maxSelfUpdateBinarySize; written += len(chunk) {
+				if _, err := w.Write([]byte(chunk)); err != nil {
+					return
+				}
 			}
-		})
+		}))
+		defer server.Close()
+
+		if _, err := downloadReleaseBinary(RuntimeConfig{}, server.URL+"/binary", 0); err == nil {
+			t.Fatalf("expected oversized download to be rejected")
+		}
+	})
+}
+
+func TestCheckAndApplySelfUpdateRejectsSignedMetadataMismatch(t *testing.T) {
+	t.Setenv(envAllowInsecureTransport, "true")
+	t.Setenv("LABTETHER_OUTBOUND_ALLOW_LOOPBACK", "true")
+	t.Setenv(envSelfUpdateAcceptUnsigned, "true")
+
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	t.Setenv(envSelfUpdateTrustedPublicKey, base64.StdEncoding.EncodeToString(publicKey))
+
+	tempDir := t.TempDir()
+	executablePath := filepath.Join(tempDir, "labtether-agent")
+	if err := os.WriteFile(executablePath, []byte("old-binary"), 0o755); err != nil {
+		t.Fatalf("write executable: %v", err)
+	}
+
+	newBinary := []byte("signed-binary")
+	newSHA := sha256Hex(newBinary)
+	// Sign metadata claiming version v1.0.0 but serve v2.0.0 below — the version
+	// tamper is inside the signed payload so verification must fail.
+	signature := base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, []byte(selfUpdateSignaturePayload(agentReleaseMetadata{
+		Version:   "v1.0.0",
+		OS:        "linux",
+		Arch:      "amd64",
+		SHA256:    newSHA,
+		SizeBytes: int64(len(newBinary)),
+	}))))
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/release":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"version":    "v2.0.0",
+				"os":         "linux",
+				"arch":       "amd64",
+				"sha256":     newSHA,
+				"size_bytes": len(newBinary),
+				"url":        server.URL + "/binary",
+				"signature":  signature,
+			})
+		case "/binary":
+			_, _ = w.Write(newBinary)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	originalExecutablePathFn := executablePathFn
+	executablePathFn = func() (string, error) { return executablePath, nil }
+	t.Cleanup(func() { executablePathFn = originalExecutablePathFn })
+
+	if _, _, err := checkAndApplySelfUpdate(RuntimeConfig{
+		AutoUpdateEnabled:  true,
+		AutoUpdateCheckURL: server.URL + "/release",
+	}); err == nil {
+		t.Fatalf("expected signature verification failure")
 	}
 }

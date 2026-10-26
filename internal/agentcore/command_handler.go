@@ -78,6 +78,9 @@ func receiveLoop(ctx context.Context, transport *wsTransport, cfg RuntimeConfig,
 	// goroutine growth under load.
 	const maxConcurrentHandlers = 20
 	sem := make(chan struct{}, maxConcurrentHandlers)
+	sessionStarts := make(chan struct{}, 30)
+	fileWriteMessages := make(chan orderedFileWrite, 64)
+	go runOrderedFileWriteWorker(ctx, fileMgr, fileWriteMessages)
 
 	for {
 		select {
@@ -86,7 +89,7 @@ func receiveLoop(ctx context.Context, transport *wsTransport, cfg RuntimeConfig,
 		default:
 		}
 
-		if !transport.Connected() {
+		if !transport.socketOpen() {
 			select {
 			case <-ctx.Done():
 				return
@@ -95,272 +98,182 @@ func receiveLoop(ctx context.Context, transport *wsTransport, cfg RuntimeConfig,
 			}
 		}
 
-		msg, err := transport.Receive()
+		msg, enrollmentPending, sourceConn, err := transport.receiveWithConnection()
 		if err != nil {
-			if transport.Connected() {
+			if sourceConn != nil && transport.socketOpen() {
 				if websocket.IsCloseError(err, websocket.CloseGoingAway) {
 					log.Printf("agentws: hub shutting down, will reconnect immediately")
 				} else {
 					log.Printf("agentws: receive error: %v", err)
 				}
-				transport.markDisconnected()
+				transport.markDisconnectedIfCurrent(sourceConn)
 			}
 			continue
 		}
+		if !inboundMessageAllowed(enrollmentPending, msg.Type) {
+			log.Printf("agentws: ignored inbound %q on pending enrollment socket", msg.Type)
+			continue
+		}
+
+		sender := transport.senderForConnection(sourceConn)
+		if sender == nil {
+			continue
+		}
+
+		if dispatchSessionMessage(transport, sourceConn, msg, termMgr, deskMgr, execMgr, webrtcMgr, audioMgr, dockerLogMgr, sessionStarts, nil) {
+			continue
+		}
+
+		dispatch := func(name string, handle func()) { launchConnectionHandler(sender, sem, nil, name, handle) }
 
 		switch msg.Type {
 		case agentmgr.MsgCommandRequest:
-			sem <- struct{}{}
-			go func() {
-				defer func() { <-sem }()
-				handleCommandRequest(transport, msg, cfg)
-			}()
+			dispatch(msg.Type, func() {
+				handleCommandRequest(sender, msg, cfg)
+			})
 		case agentmgr.MsgPing:
 			// Lightweight — no semaphore.
-			_ = transport.Send(agentmgr.Message{Type: agentmgr.MsgPong})
+			_ = sender.Send(agentmgr.Message{Type: agentmgr.MsgPong})
 		case agentmgr.MsgConfigUpdate:
 			// Lightweight — no semaphore.
-			handleConfigUpdate(transport, msg, runtime)
+			handleConfigUpdate(sender, msg, runtime)
 		case agentmgr.MsgAgentSettingsApply:
 			// Lightweight — no semaphore.
-			handleAgentSettingsApply(transport, msg, runtime)
+			handleAgentSettingsApply(sender, msg, runtime)
 		case agentmgr.MsgUpdateRequest:
-			sem <- struct{}{}
-			go func() {
-				defer func() { <-sem }()
-				handleUpdateRequest(transport, msg, cfg)
-			}()
+			dispatch(msg.Type, func() {
+				handleUpdateRequest(sender, msg, cfg)
+			})
 		case agentmgr.MsgTerminalProbe:
 			// Lightweight — no semaphore.
 			termMgr.HandleTerminalProbe(transport)
-		case agentmgr.MsgTerminalStart:
-			sem <- struct{}{}
-			go func() {
-				defer func() { <-sem }()
-				termMgr.HandleTerminalStart(transport, msg)
-			}()
-		case agentmgr.MsgTerminalData:
-			// Lightweight — no semaphore.
-			termMgr.HandleTerminalData(msg)
-		case agentmgr.MsgTerminalResize:
-			// Lightweight — no semaphore.
-			termMgr.HandleTerminalResize(msg)
 		case agentmgr.MsgTerminalTmuxKill:
-			sem <- struct{}{}
-			go func() {
-				defer func() { <-sem }()
-				termMgr.HandleTerminalTmuxKill(transport, msg)
-			}()
-		case agentmgr.MsgTerminalClose:
-			// Lightweight — no semaphore.
-			termMgr.HandleTerminalClose(msg)
+			dispatch(msg.Type, func() {
+				termMgr.HandleTerminalTmuxKill(sender, msg)
+			})
 		case agentmgr.MsgSSHKeyInstall:
-			sem <- struct{}{}
-			go func() {
-				defer func() { <-sem }()
-				handleSSHKeyInstall(transport, msg)
-			}()
+			dispatch(msg.Type, func() {
+				handleSSHKeyInstall(sender, msg)
+			})
 		case agentmgr.MsgSSHKeyRemove:
-			sem <- struct{}{}
-			go func() {
-				defer func() { <-sem }()
-				handleSSHKeyRemove(transport, msg)
-			}()
-		case agentmgr.MsgDesktopStart:
-			sem <- struct{}{}
-			go func() {
-				defer func() { <-sem }()
-				deskMgr.HandleDesktopStart(transport, msg)
-			}()
-		case agentmgr.MsgDesktopData:
-			// Lightweight — no semaphore.
-			deskMgr.HandleDesktopData(msg)
-		case agentmgr.MsgDesktopClose:
-			// Lightweight — no semaphore.
-			deskMgr.HandleDesktopClose(msg)
+			dispatch(msg.Type, func() {
+				handleSSHKeyRemove(sender, msg)
+			})
 		case agentmgr.MsgDesktopListDisplays:
-			sem <- struct{}{}
-			go func() {
-				defer func() { <-sem }()
-				handleListDisplays(transport, msg)
-			}()
+			dispatch(msg.Type, func() {
+				handleListDisplays(sender, msg)
+			})
 		case agentmgr.MsgDesktopDiagnose:
-			sem <- struct{}{}
-			go func() {
-				defer func() { <-sem }()
-				handleDesktopDiagnose(transport, msg, deskMgr, webrtcMgr)
-			}()
-		case agentmgr.MsgWebRTCStart:
-			if webrtcMgr != nil {
-				sem <- struct{}{}
-				go func() {
-					defer func() { <-sem }()
-					webrtcMgr.HandleWebRTCStart(transport, msg)
-				}()
-			}
-		case agentmgr.MsgWebRTCOffer:
-			if webrtcMgr != nil {
-				// Offer handling is signaling-only and lightweight.
-				webrtcMgr.HandleWebRTCOffer(msg, transport)
-			}
-		case agentmgr.MsgWebRTCICE:
-			if webrtcMgr != nil {
-				// ICE candidate handling is lightweight.
-				webrtcMgr.HandleWebRTCICE(msg)
-			}
-		case agentmgr.MsgWebRTCInput:
-			if webrtcMgr != nil {
-				// Input relay is lightweight.
-				webrtcMgr.HandleWebRTCInput(msg)
-			}
-		case agentmgr.MsgWebRTCStop:
-			if webrtcMgr != nil {
-				// Stop is lightweight.
-				webrtcMgr.HandleWebRTCStop(msg, transport)
-			}
+			dispatch(msg.Type, func() {
+				handleDesktopDiagnose(sender, msg, deskMgr, webrtcMgr)
+			})
 		case agentmgr.MsgWoLSend:
 			// Lightweight — no semaphore.
-			system.HandleWoLSend(transport, msg)
+			system.HandleWoLSend(sender, msg)
 		case agentmgr.MsgFileList:
-			sem <- struct{}{}
-			go func() {
-				defer func() { <-sem }()
-				fileMgr.HandleFileList(transport, msg)
-			}()
+			dispatch(msg.Type, func() {
+				fileMgr.HandleFileList(sender, msg)
+			})
 		case agentmgr.MsgFileRead:
-			sem <- struct{}{}
-			go func() {
-				defer func() { <-sem }()
-				fileMgr.HandleFileRead(transport, msg)
-			}()
+			dispatch(msg.Type, func() {
+				fileMgr.HandleFileRead(sender, msg)
+			})
 		case agentmgr.MsgFileWrite:
 			// Lightweight — no semaphore.
-			fileMgr.HandleFileWrite(transport, msg)
+			if !enqueueOrderedFileWrite(sender.Context(), sender, fileWriteMessages, msg) {
+				continue
+			}
 		case agentmgr.MsgFileMkdir:
-			sem <- struct{}{}
-			go func() {
-				defer func() { <-sem }()
-				fileMgr.HandleFileMkdir(transport, msg)
-			}()
+			dispatch(msg.Type, func() {
+				fileMgr.HandleFileMkdir(sender, msg)
+			})
 		case agentmgr.MsgFileDelete:
-			sem <- struct{}{}
-			go func() {
-				defer func() { <-sem }()
-				fileMgr.HandleFileDelete(transport, msg)
-			}()
+			dispatch(msg.Type, func() {
+				fileMgr.HandleFileDelete(sender, msg)
+			})
 		case agentmgr.MsgFileRename:
-			sem <- struct{}{}
-			go func() {
-				defer func() { <-sem }()
-				fileMgr.HandleFileRename(transport, msg)
-			}()
+			dispatch(msg.Type, func() {
+				fileMgr.HandleFileRename(sender, msg)
+			})
 		case agentmgr.MsgFileCopy:
-			sem <- struct{}{}
-			go func() {
-				defer func() { <-sem }()
-				fileMgr.HandleFileCopy(transport, msg)
-			}()
+			dispatch(msg.Type, func() {
+				fileMgr.HandleFileCopy(sender, msg)
+			})
 		case agentmgr.MsgFileSearch:
-			sem <- struct{}{}
-			go func() {
-				defer func() { <-sem }()
-				fileMgr.HandleFileSearch(transport, msg)
-			}()
+			dispatch(msg.Type, func() {
+				fileMgr.HandleFileSearch(sender, msg)
+			})
 		case agentmgr.MsgProcessList:
 			if processMgr != nil {
-				sem <- struct{}{}
-				go func() {
-					defer func() { <-sem }()
-					processMgr.HandleProcessList(transport, msg)
-				}()
+				dispatch(msg.Type, func() {
+					processMgr.HandleProcessList(sender, msg)
+				})
 			}
 		case agentmgr.MsgProcessKill:
 			if processMgr != nil {
-				sem <- struct{}{}
-				go func() {
-					defer func() { <-sem }()
-					processMgr.HandleProcessKill(transport, msg)
-				}()
+				dispatch(msg.Type, func() {
+					processMgr.HandleProcessKill(sender, msg)
+				})
 			}
 		case agentmgr.MsgServiceList:
 			if serviceMgr != nil {
-				sem <- struct{}{}
-				go func() {
-					defer func() { <-sem }()
-					serviceMgr.HandleServiceList(transport, msg)
-				}()
+				dispatch(msg.Type, func() {
+					serviceMgr.HandleServiceList(sender, msg)
+				})
 			}
 		case agentmgr.MsgServiceAction:
 			if serviceMgr != nil {
-				sem <- struct{}{}
-				go func() {
-					defer func() { <-sem }()
-					serviceMgr.HandleServiceAction(transport, msg)
-				}()
+				dispatch(msg.Type, func() {
+					serviceMgr.HandleServiceAction(sender, msg)
+				})
 			}
 		case agentmgr.MsgJournalQuery:
 			if journalMgr != nil {
-				sem <- struct{}{}
-				go func() {
-					defer func() { <-sem }()
-					journalMgr.HandleJournalQuery(transport, msg)
-				}()
+				dispatch(msg.Type, func() {
+					journalMgr.HandleJournalQuery(sender, msg)
+				})
 			}
 		case agentmgr.MsgDiskList:
 			if diskMgr != nil {
-				sem <- struct{}{}
-				go func() {
-					defer func() { <-sem }()
-					diskMgr.HandleDiskList(transport, msg)
-				}()
+				dispatch(msg.Type, func() {
+					diskMgr.HandleDiskList(sender, msg)
+				})
 			}
 		case agentmgr.MsgNetworkList:
 			if networkMgr != nil {
-				sem <- struct{}{}
-				go func() {
-					defer func() { <-sem }()
-					networkMgr.HandleNetworkList(transport, msg)
-				}()
+				dispatch(msg.Type, func() {
+					networkMgr.HandleNetworkList(sender, msg)
+				})
 			}
 		case agentmgr.MsgNetworkAction:
 			if networkMgr != nil {
-				sem <- struct{}{}
-				go func() {
-					defer func() { <-sem }()
-					networkMgr.HandleNetworkAction(transport, msg)
-				}()
+				dispatch(msg.Type, func() {
+					networkMgr.HandleNetworkAction(sender, msg)
+				})
 			}
 		case agentmgr.MsgPackageList:
 			if packageMgr != nil {
-				sem <- struct{}{}
-				go func() {
-					defer func() { <-sem }()
-					packageMgr.HandlePackageList(transport, msg)
-				}()
+				dispatch(msg.Type, func() {
+					packageMgr.HandlePackageList(sender, msg)
+				})
 			}
 		case agentmgr.MsgPackageAction:
 			if packageMgr != nil {
-				sem <- struct{}{}
-				go func() {
-					defer func() { <-sem }()
-					packageMgr.HandlePackageAction(transport, msg)
-				}()
+				dispatch(msg.Type, func() {
+					packageMgr.HandlePackageAction(sender, msg)
+				})
 			}
 		case agentmgr.MsgCronList:
 			if cronMgr != nil {
-				sem <- struct{}{}
-				go func() {
-					defer func() { <-sem }()
-					cronMgr.HandleCronList(transport, msg)
-				}()
+				dispatch(msg.Type, func() {
+					cronMgr.HandleCronList(sender, msg)
+				})
 			}
 		case agentmgr.MsgUsersList:
 			if usersMgr != nil {
-				sem <- struct{}{}
-				go func() {
-					defer func() { <-sem }()
-					usersMgr.HandleUsersList(transport, msg)
-				}()
+				dispatch(msg.Type, func() {
+					usersMgr.HandleUsersList(sender, msg)
+				})
 			}
 		case agentmgr.MsgAlertNotify:
 			// Lightweight — no semaphore.
@@ -377,94 +290,34 @@ func receiveLoop(ctx context.Context, transport *wsTransport, cfg RuntimeConfig,
 		// Clipboard messages.
 		case agentmgr.MsgClipboardGet:
 			if clipMgr != nil {
-				sem <- struct{}{}
-				go func() {
-					defer func() { <-sem }()
-					clipMgr.HandleClipboardGet(transport, msg)
-				}()
+				dispatch(msg.Type, func() {
+					clipMgr.HandleClipboardGet(sender, msg)
+				})
 			}
 		case agentmgr.MsgClipboardSet:
 			if clipMgr != nil {
-				sem <- struct{}{}
-				go func() {
-					defer func() { <-sem }()
-					clipMgr.HandleClipboardSet(transport, msg)
-				}()
+				dispatch(msg.Type, func() {
+					clipMgr.HandleClipboardSet(sender, msg)
+				})
 			}
 		// Desktop audio sideband messages.
-		case agentmgr.MsgDesktopAudioStart:
-			if audioMgr != nil {
-				sem <- struct{}{}
-				go func() {
-					defer func() { <-sem }()
-					audioMgr.HandleAudioStart(transport, msg)
-				}()
-			}
-		case agentmgr.MsgDesktopAudioStop:
-			// Lightweight — no semaphore.
-			if audioMgr != nil {
-				audioMgr.HandleAudioStop(msg)
-			}
-		// Docker container management messages.
 		case agentmgr.MsgDockerAction:
 			if dockerCollector != nil {
-				sem <- struct{}{}
-				go func() {
-					defer func() { <-sem }()
-					dockerCollector.HandleDockerAction(transport, msg)
-				}()
-			}
-		case agentmgr.MsgDockerExecStart:
-			if execMgr != nil {
-				sem <- struct{}{}
-				go func() {
-					defer func() { <-sem }()
-					execMgr.HandleExecStart(transport, msg)
-				}()
-			}
-		case agentmgr.MsgDockerExecInput:
-			// Lightweight — no semaphore.
-			if execMgr != nil {
-				execMgr.HandleExecInput(msg)
-			}
-		case agentmgr.MsgDockerExecResize:
-			// Lightweight — no semaphore.
-			if execMgr != nil {
-				execMgr.HandleExecResize(msg)
-			}
-		case agentmgr.MsgDockerExecClose:
-			// Lightweight — no semaphore.
-			if execMgr != nil {
-				execMgr.HandleExecClose(msg)
-			}
-		case agentmgr.MsgDockerLogsStart:
-			if dockerLogMgr != nil {
-				sem <- struct{}{}
-				go func() {
-					defer func() { <-sem }()
-					dockerLogMgr.HandleLogsStart(ctx, transport, msg)
-				}()
-			}
-		case agentmgr.MsgDockerLogsStop:
-			// Lightweight — no semaphore.
-			if dockerLogMgr != nil {
-				dockerLogMgr.HandleLogsStop(msg)
+				dispatch(msg.Type, func() {
+					dockerCollector.HandleDockerAction(sender, msg)
+				})
 			}
 		case agentmgr.MsgDockerComposeAction:
 			if dockerCollector != nil {
-				sem <- struct{}{}
-				go func() {
-					defer func() { <-sem }()
-					dockerCollector.HandleComposeAction(transport, msg)
-				}()
+				dispatch(msg.Type, func() {
+					dockerCollector.HandleComposeAction(sender, msg)
+				})
 			}
 		case agentmgr.MsgWebServiceSync:
 			if webServiceCollector != nil {
-				sem <- struct{}{}
-				go func() {
-					defer func() { <-sem }()
+				dispatch(msg.Type, func() {
 					webServiceCollector.RunCycle(ctx)
-				}()
+				})
 			}
 		default:
 			log.Printf("agentws: unknown message type from hub: %s", msg.Type)
@@ -491,26 +344,4 @@ func handleAlertNotify(msg agentmgr.Message, runtime *Runtime) {
 	}
 	runtime.pushAlert(snapshot)
 	log.Printf("agentws: alert %s [%s] %s: %s", data.ID, data.Severity, data.State, data.Title)
-}
-
-// sendTelemetrySample sends a TelemetrySample as a telemetry message over
-// the WebSocket transport.
-func sendTelemetrySample(transport *wsTransport, sample TelemetrySample) {
-	td := agentmgr.TelemetryData{
-		AssetID:          sample.AssetID,
-		CPUPercent:       sample.CPUPercent,
-		MemoryPercent:    sample.MemoryPercent,
-		DiskPercent:      sample.DiskPercent,
-		NetRXBytesPerSec: sample.NetRXBytesPerSec,
-		NetTXBytesPerSec: sample.NetTXBytesPerSec,
-		TempCelsius:      sample.TempCelsius,
-	}
-	data, err := json.Marshal(td)
-	if err != nil {
-		return
-	}
-	_ = transport.Send(agentmgr.Message{
-		Type: agentmgr.MsgTelemetry,
-		Data: data,
-	})
 }

@@ -132,6 +132,9 @@ func (dc *DockerCollector) HandleComposeAction(transport Transport, msg agentmgr
 		return
 	}
 	cmd.Dir = configDir
+	// A descendant keeping inherited pipes open must not occupy this handler
+	// forever. This bounds pipe draining after exit or cancellation.
+	cmd.WaitDelay = time.Second
 	output, err := cmd.CombinedOutput()
 	outputStr := strings.TrimSpace(string(output))
 

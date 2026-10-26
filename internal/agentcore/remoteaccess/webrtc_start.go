@@ -15,21 +15,19 @@ func ResolveWebRTCDisplay(requested string, caps agentmgr.WebRTCCapabilitiesData
 	if strings.EqualFold(strings.TrimSpace(caps.DesktopSessionType), DesktopSessionTypeWayland) {
 		return ""
 	}
-	display := strings.TrimSpace(requested)
+	display := NormalizeX11DisplayIdentifier(requested)
 	if display != "" {
 		for _, candidate := range caps.Displays {
-			if display == strings.TrimSpace(candidate) {
+			if display == NormalizeX11DisplayIdentifier(candidate) {
 				return display
 			}
 		}
-		if strings.HasPrefix(display, ":") {
-			return display
-		}
+		return display
 	}
 	for _, candidate := range caps.Displays {
-		trimmed := strings.TrimSpace(candidate)
-		if trimmed != "" {
-			return trimmed
+		normalized := NormalizeX11DisplayIdentifier(candidate)
+		if normalized != "" {
+			return normalized
 		}
 	}
 	return ":0"
@@ -47,27 +45,47 @@ func WebRTCVideoBitrateForQuality(quality string) int {
 }
 
 func (wm *WebRTCManager) HandleWebRTCStart(transport MessageSender, msg agentmgr.Message) {
+	if start := wm.PrepareWebRTCStart(transport, msg); start != nil {
+		start()
+	}
+}
+
+// PrepareWebRTCStart reserves the owner before socket dispatch returns. The
+// deferred worker belongs to this transport epoch even if reconnect runs first.
+func (wm *WebRTCManager) PrepareWebRTCStart(transport MessageSender, msg agentmgr.Message) func() {
 	var req agentmgr.WebRTCSessionData
 	if err := json.Unmarshal(msg.Data, &req); err != nil {
-		log.Printf("webrtc: invalid start request: %v", err)
-		return
+		return func() { log.Printf("webrtc: invalid start request: %v", err) }
 	}
-	if strings.TrimSpace(req.SessionID) == "" {
-		log.Printf("webrtc: missing session_id")
-		return
+	req.SessionID = strings.TrimSpace(req.SessionID)
+	if req.SessionID == "" {
+		return func() { log.Printf("webrtc: missing session_id") }
 	}
-
 	if !wm.caps.Available {
-		SendWebRTCStopped(transport, req.SessionID, "webrtc unavailable")
-		return
+		return func() { SendWebRTCStopped(transport, req.SessionID, "webrtc unavailable") }
 	}
+	parent := context.Background()
+	if sender, ok := transport.(interface{ Context() context.Context }); ok {
+		parent = sender.Context()
+	}
+	pending, rejectionReason := wm.reserveSessionStartContext(parent, req.SessionID)
+	if pending == nil {
+		return func() { SendWebRTCStopped(transport, req.SessionID, rejectionReason) }
+	}
+	return func() { wm.startWebRTCSession(transport, req, pending) }
+}
 
-	wm.Mu.Lock()
-	if _, exists := wm.Sessions[req.SessionID]; exists {
-		wm.Mu.Unlock()
+func (wm *WebRTCManager) startWebRTCSession(transport MessageSender, req agentmgr.WebRTCSessionData, pending *pendingWebRTCStart) {
+	registered := false
+	defer func() {
+		if !registered {
+			wm.abortPendingSession(req.SessionID, pending, "session start aborted")
+		}
+	}()
+	ctx := pending.ctx
+	if ctx.Err() != nil {
 		return
 	}
-	wm.Mu.Unlock()
 
 	settings := map[string]string{}
 	if wm.settings != nil {
@@ -75,14 +93,14 @@ func (wm *WebRTCManager) HandleWebRTCStart(transport MessageSender, msg agentmgr
 	}
 	webrtcCfg := LoadWebRTCConfig(settings)
 	if !webrtcCfg.Enabled {
-		SendWebRTCStopped(transport, req.SessionID, "webrtc disabled")
+		wm.sendPendingStopped(transport, req.SessionID, pending, "webrtc disabled")
 		return
 	}
 	sessionInfo := DetectDesktopSessionFn()
 
 	encName, gstEncoder := BestVideoEncoder(wm.caps)
 	if gstEncoder == "" {
-		SendWebRTCStopped(transport, req.SessionID, "no supported encoder")
+		wm.sendPendingStopped(transport, req.SessionID, pending, "no supported encoder")
 		return
 	}
 
@@ -93,7 +111,7 @@ func (wm *WebRTCManager) HandleWebRTCStart(transport MessageSender, msg agentmgr
 
 	videoPort, err := FindFreeUDPPort()
 	if err != nil {
-		SendWebRTCStopped(transport, req.SessionID, "failed to allocate video RTP port")
+		wm.sendPendingStopped(transport, req.SessionID, pending, "failed to allocate video RTP port")
 		return
 	}
 	audioPort := 0
@@ -107,19 +125,19 @@ func (wm *WebRTCManager) HandleWebRTCStart(transport MessageSender, msg agentmgr
 
 	m := &webrtc.MediaEngine{}
 	if err := m.RegisterDefaultCodecs(); err != nil {
-		SendWebRTCStopped(transport, req.SessionID, "codec registration failed")
+		wm.sendPendingStopped(transport, req.SessionID, pending, "codec registration failed")
 		return
 	}
 	i := &interceptor.Registry{}
 	if err := webrtc.RegisterDefaultInterceptors(m, i); err != nil {
-		SendWebRTCStopped(transport, req.SessionID, "interceptor registration failed")
+		wm.sendPendingStopped(transport, req.SessionID, pending, "interceptor registration failed")
 		return
 	}
 	api := webrtc.NewAPI(webrtc.WithMediaEngine(m), webrtc.WithInterceptorRegistry(i))
 
 	pc, err := api.NewPeerConnection(webrtc.Configuration{ICEServers: webrtcCfg.iceServers()})
 	if err != nil {
-		SendWebRTCStopped(transport, req.SessionID, "peer connection init failed")
+		wm.sendPendingStopped(transport, req.SessionID, pending, "peer connection init failed")
 		return
 	}
 
@@ -130,12 +148,12 @@ func (wm *WebRTCManager) HandleWebRTCStart(transport MessageSender, msg agentmgr
 	videoTrack, err := webrtc.NewTrackLocalStaticRTP(videoCodec, "video", "labtether-screen")
 	if err != nil {
 		_ = pc.Close()
-		SendWebRTCStopped(transport, req.SessionID, "video track creation failed")
+		wm.sendPendingStopped(transport, req.SessionID, pending, "video track creation failed")
 		return
 	}
 	if _, err := pc.AddTrack(videoTrack); err != nil {
 		_ = pc.Close()
-		SendWebRTCStopped(transport, req.SessionID, "video track attach failed")
+		wm.sendPendingStopped(transport, req.SessionID, pending, "video track attach failed")
 		return
 	}
 
@@ -168,7 +186,7 @@ func (wm *WebRTCManager) HandleWebRTCStart(transport MessageSender, msg agentmgr
 		dynDisplay, dynXAuthPath, acquireErr := wm.dispMgr.acquire()
 		if acquireErr != nil {
 			_ = pc.Close()
-			SendWebRTCStopped(transport, req.SessionID, "no display available: "+acquireErr.Error())
+			wm.sendPendingStopped(transport, req.SessionID, pending, "no display available: "+acquireErr.Error())
 			return
 		}
 		display = dynDisplay
@@ -183,7 +201,6 @@ func (wm *WebRTCManager) HandleWebRTCStart(transport MessageSender, msg agentmgr
 		WakeX11Display(display, xauthPath)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
 	width := req.Width
 	if width <= 0 {
 		width = 1920
@@ -213,7 +230,8 @@ func (wm *WebRTCManager) HandleWebRTCStart(transport MessageSender, msg agentmgr
 		videoPort:      videoPort,
 		audioPort:      audioPort,
 		inputCh:        make(chan WebRTCInputEvent, 128),
-		cancel:         cancel,
+		inputDone:      make(chan struct{}),
+		cancel:         pending.cancel,
 		done:           make(chan struct{}),
 		ManagedDisplay: acquiredDisplay,
 		xauthPath:      xauthPath,
@@ -226,6 +244,15 @@ func (wm *WebRTCManager) HandleWebRTCStart(transport MessageSender, msg agentmgr
 	if sess.inputBackend == "" {
 		sess.inputBackend = "auto"
 	}
+	sess.onInputFailure = func(reason string) { wm.failWebRTCInput(transport, sess, reason) }
+	go func() {
+		defer close(sess.inputDone)
+		InjectInputEvents(ctx, sess.inputCh, display, xauthPath, sess)
+	}()
+	if !wm.bindPendingSession(req.SessionID, pending, sess) {
+		sess.close("session start canceled")
+		return
+	}
 
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
 		if dc == nil {
@@ -234,19 +261,28 @@ func (wm *WebRTCManager) HandleWebRTCStart(transport MessageSender, msg agentmgr
 		switch dc.Label() {
 		case "input":
 			dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+				if !wm.sessionIsCurrent(req.SessionID, sess) {
+					return
+				}
 				evt, err := DecodeWebRTCInputEvent(msg.Data)
 				if err != nil {
 					return
 				}
-				sess.queueInputEvent(evt)
+				wm.enqueueWebRTCInput(transport, sess, evt)
 			})
 		case "clipboard":
 			dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+				if !wm.sessionIsCurrent(req.SessionID, sess) {
+					return
+				}
 				wm.handleClipboardDataChannelMessage(dc, msg)
 			})
 		case "file-transfer":
 			dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-				wm.handleFileTransferDataChannelMessage(dc, msg)
+				if !wm.sessionIsCurrent(req.SessionID, sess) {
+					return
+				}
+				wm.handleFileTransferDataChannelMessageContext(ctx, dc, msg)
 			})
 		}
 	})
@@ -269,7 +305,12 @@ func (wm *WebRTCManager) HandleWebRTCStart(transport MessageSender, msg agentmgr
 		}
 		raw, _ := json.Marshal(data)
 		sendCandidate := func() {
-			_ = transport.Send(agentmgr.Message{Type: agentmgr.MsgWebRTCICE, ID: req.SessionID, Data: raw})
+			wm.sendSessionMessageIfCurrent(
+				transport,
+				req.SessionID,
+				sess,
+				agentmgr.Message{Type: agentmgr.MsgWebRTCICE, ID: req.SessionID, Data: raw},
+			)
 		}
 		if delay := ICECandidateSendDelay(candidate.Candidate); delay > 0 {
 			go func() {
@@ -302,14 +343,11 @@ func (wm *WebRTCManager) HandleWebRTCStart(transport MessageSender, msg agentmgr
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		log.Printf("webrtc: peer state session=%s state=%s", req.SessionID, state.String())
 		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
-			wm.CleanupWithReason(req.SessionID, "peer connection "+state.String())
-			SendWebRTCStopped(transport, req.SessionID, "peer connection "+state.String())
+			if wm.cleanupSessionInstance(req.SessionID, sess, "peer connection "+state.String()) {
+				SendWebRTCStopped(transport, req.SessionID, "peer connection "+state.String())
+			}
 		}
 	})
-
-	wm.Mu.Lock()
-	wm.Sessions[req.SessionID] = sess
-	wm.Mu.Unlock()
 	fps := req.FPS
 	if fps <= 0 {
 		fps = webrtcCfg.FPS
@@ -340,8 +378,7 @@ func (wm *WebRTCManager) HandleWebRTCStart(transport MessageSender, msg agentmgr
 	}
 	gstVideoCmd, err := NewWebRTCSecurityCommand("gst-launch-1.0", ParsePipelineArgs(videoPipeline)...)
 	if err != nil {
-		wm.CleanupWithReason(req.SessionID, "gst-launch unavailable")
-		SendWebRTCStopped(transport, req.SessionID, "gst-launch unavailable")
+		wm.sendPendingStopped(transport, req.SessionID, pending, "gst-launch unavailable")
 		return
 	}
 	if sessionInfo.Type == DesktopSessionTypeWayland {
@@ -351,13 +388,16 @@ func (wm *WebRTCManager) HandleWebRTCStart(transport MessageSender, msg agentmgr
 	}
 	videoLogPath, err := StartWebRTCPipelineWithLog(gstVideoCmd, "labtether-webrtc-video-*.log")
 	if err != nil {
-		wm.CleanupWithReason(req.SessionID, "failed to start video pipeline")
-		SendWebRTCStopped(transport, req.SessionID, "failed to start video pipeline")
+		wm.sendPendingStopped(transport, req.SessionID, pending, "failed to start video pipeline")
 		return
 	}
-	sess.gstVideoCmd = gstVideoCmd
-	sess.videoLogPath = videoLogPath
-	go wm.WatchPipelineExit(ctx, req.SessionID, "video", gstVideoCmd, videoLogPath, transport)
+	if !sess.attachVideoPipeline(gstVideoCmd, videoLogPath) {
+		return
+	}
+	go wm.watchPipelineExit(ctx, req.SessionID, sess, "video", gstVideoCmd, videoLogPath, transport)
+	if ctx.Err() != nil {
+		return
+	}
 
 	if audioTrack != nil && audioPort > 0 && audioSource != "" {
 		audioPipeline := BuildGStreamerAudioPipeline(GstAudioConfig{
@@ -373,9 +413,9 @@ func (wm *WebRTCManager) HandleWebRTCStart(transport MessageSender, msg agentmgr
 			}
 			audioLogPath, startErr := StartWebRTCPipelineWithLog(gstAudioCmd, "labtether-webrtc-audio-*.log")
 			if startErr == nil {
-				sess.gstAudioCmd = gstAudioCmd
-				sess.audioLogPath = audioLogPath
-				go wm.WatchPipelineExit(ctx, req.SessionID, "audio", gstAudioCmd, audioLogPath, transport)
+				if sess.attachAudioPipeline(gstAudioCmd, audioLogPath) {
+					go wm.watchPipelineExit(ctx, req.SessionID, sess, "audio", gstAudioCmd, audioLogPath, transport)
+				}
 			} else {
 				log.Printf("webrtc: failed to start audio pipeline for %s: %v", req.SessionID, startErr)
 			}
@@ -383,19 +423,29 @@ func (wm *WebRTCManager) HandleWebRTCStart(transport MessageSender, msg agentmgr
 			log.Printf("webrtc: failed to build audio pipeline command for %s: %v", req.SessionID, audioErr)
 		}
 	}
-
-	go ReadRTPToTrack(ctx, videoPort, videoTrack)
-	if audioTrack != nil && audioPort > 0 {
-		go ReadRTPToTrack(ctx, audioPort, audioTrack)
+	if ctx.Err() != nil || !wm.promotePendingSession(req.SessionID, pending) {
+		return
 	}
-	go InjectInputEvents(ctx, sess.inputCh, display, xauthPath, sess)
+	registered = true
 
 	startedData, _ := json.Marshal(agentmgr.WebRTCStartedData{
 		SessionID:    req.SessionID,
 		VideoEncoder: encName,
 		AudioSource:  audioSource,
 	})
-	_ = transport.Send(agentmgr.Message{Type: agentmgr.MsgWebRTCStarted, ID: req.SessionID, Data: startedData})
+	if !wm.sendSessionMessageIfCurrent(
+		transport,
+		req.SessionID,
+		sess,
+		agentmgr.Message{Type: agentmgr.MsgWebRTCStarted, ID: req.SessionID, Data: startedData},
+	) {
+		return
+	}
+
+	go ReadRTPToTrack(ctx, videoPort, videoTrack)
+	if audioTrack != nil && audioPort > 0 {
+		go ReadRTPToTrack(ctx, audioPort, audioTrack)
+	}
 
 	log.Printf("webrtc: session started id=%s encoder=%s audio=%s", req.SessionID, encName, audioSource)
 }

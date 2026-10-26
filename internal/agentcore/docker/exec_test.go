@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/labtether/labtether-linux/internal/agentcore/streaminput"
 	"github.com/labtether/labtether-linux/pkg/agentmgr"
 )
 
@@ -112,12 +113,14 @@ func TestDockerExecInputWritesToSessionConn(t *testing.T) {
 	sessionID := "sess-1"
 	em.mu.Lock()
 	em.sessions[sessionID] = &dockerExecSession{
-		sessionID: sessionID,
-		conn:      local,
-		cancel:    func() {},
-		done:      make(chan struct{}),
+		sessionID:   sessionID,
+		conn:        local,
+		inputWriter: streaminput.New(local, nil),
+		cancel:      func() {},
+		done:        make(chan struct{}),
 	}
 	em.mu.Unlock()
+	defer em.CloseAll()
 
 	expected := "echo test\n"
 	raw, _ := json.Marshal(agentmgr.DockerExecInputData{

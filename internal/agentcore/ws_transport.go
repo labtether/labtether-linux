@@ -89,6 +89,10 @@ const (
 )
 
 type wsTransport struct {
+	sessionDispatchMu  sync.RWMutex
+	beforeConnect      func()
+	connectionCtx      context.Context
+	connectionCancel   context.CancelFunc
 	url                string
 	apiBaseURL         string
 	token              string
@@ -112,6 +116,7 @@ type wsTransport struct {
 	mu                      sync.Mutex
 	conn                    *websocket.Conn
 	connected               bool
+	pendingEnrollment       bool
 	pingDone                chan struct{} // closed to stop ping goroutine
 	consecutiveAuthFailures int
 	lastError               string
@@ -244,15 +249,24 @@ func (t *wsTransport) connectWithResponse(ctx context.Context) (*http.Response, 
 		return conn.SetReadDeadline(time.Now().Add(clientReadDeadline))
 	})
 
+	t.sessionDispatchMu.Lock()
+	defer t.sessionDispatchMu.Unlock()
+	t.markDisconnected()
+	if t.beforeConnect != nil {
+		t.beforeConnect()
+	}
+	if err := ctx.Err(); err != nil {
+		_ = conn.Close()
+		return resp, err
+	}
 	t.mu.Lock()
 	if t.identityGeneration != identity.generation {
 		t.mu.Unlock()
 		_ = conn.Close()
 		return resp, fmt.Errorf("agent credential changed during websocket handshake")
 	}
-	if t.conn != nil {
-		_ = t.conn.Close()
-	}
+	t.connectionCtx, t.connectionCancel = context.WithCancel(ctx)
+
 	// Stop the previous ping goroutine if one is running.
 	if t.pingDone != nil {
 		close(t.pingDone)
@@ -261,6 +275,7 @@ func (t *wsTransport) connectWithResponse(ctx context.Context) (*http.Response, 
 	t.pingDone = pingDone
 	t.conn = conn
 	t.connected = true
+	t.pendingEnrollment = token == ""
 	t.consecutiveAuthFailures = 0
 	t.lastError = ""
 	t.disconnectedAt = time.Time{}
@@ -301,18 +316,23 @@ func (t *wsTransport) pingLoop(conn *websocket.Conn, done chan struct{}) {
 			t.mu.Unlock()
 			if err != nil {
 				log.Printf("agentws: ping send failed: %v", err)
-				t.markDisconnected()
+				t.markDisconnectedIfCurrent(conn)
 				return
 			}
 		}
 	}
 }
 
-func (t *wsTransport) Send(msg agentmgr.Message) error {
+func (t *wsTransport) Send(msg agentmgr.Message) error { return t.sendOnConnection(nil, msg) }
+
+func (t *wsTransport) sendOnConnection(expected *websocket.Conn, msg agentmgr.Message) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.conn == nil {
+	if t.conn == nil || (expected != nil && t.conn != expected) {
 		return errNotConnected
+	}
+	if t.pendingEnrollment && msg.Type != agentmgr.MsgEnrollmentProof {
+		return errEnrollmentPending
 	}
 	// Apply a write deadline so that a slow or unresponsive hub cannot block
 	// Send indefinitely while holding t.mu. Without this, heartbeat, telemetry,
@@ -326,24 +346,12 @@ func (t *wsTransport) Send(msg agentmgr.Message) error {
 	return err
 }
 
-func (t *wsTransport) Receive() (agentmgr.Message, error) {
-	t.mu.Lock()
-	conn := t.conn
-	t.mu.Unlock()
-	if conn == nil {
-		return agentmgr.Message{}, errNotConnected
-	}
-
-	var msg agentmgr.Message
-	err := conn.ReadJSON(&msg)
-	if err == nil {
-		atomic.AddInt64(&t.messagesReceived, 1)
-	}
-	return msg, err
-}
-
 func (t *wsTransport) Close() {
 	t.mu.Lock()
+	if t.connectionCancel != nil {
+		t.connectionCancel()
+		t.connectionCancel = nil
+	}
 	defer t.mu.Unlock()
 	if t.pingDone != nil {
 		close(t.pingDone)
@@ -354,12 +362,13 @@ func (t *wsTransport) Close() {
 		t.conn = nil
 	}
 	t.connected = false
+	t.pendingEnrollment = false
 }
 
 func (t *wsTransport) Connected() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.connected
+	return t.connected && !t.pendingEnrollment
 }
 
 // ConnectionState returns a human-readable connection state plus the last error
@@ -367,6 +376,9 @@ func (t *wsTransport) Connected() bool {
 func (t *wsTransport) ConnectionState() (state string, lastErr string, disconnectedAt time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.connected && t.pendingEnrollment {
+		return "enrollment_pending", "", time.Time{}
+	}
 	if t.connected {
 		return "connected", "", time.Time{}
 	}
@@ -379,9 +391,20 @@ func (t *wsTransport) ConnectionState() (state string, lastErr string, disconnec
 	return "disconnected", "", t.disconnectedAt
 }
 
-func (t *wsTransport) markDisconnected() {
+func (t *wsTransport) markDisconnected() { t.markDisconnectedIfCurrent(nil) }
+
+func (t *wsTransport) markDisconnectedIfCurrent(expected *websocket.Conn) {
 	t.mu.Lock()
+	if expected != nil && t.conn != expected {
+		t.mu.Unlock()
+		return
+	}
+	if t.connectionCancel != nil {
+		t.connectionCancel()
+		t.connectionCancel = nil
+	}
 	t.connected = false
+	t.pendingEnrollment = false
 	if t.pingDone != nil {
 		close(t.pingDone)
 		t.pingDone = nil
@@ -418,7 +441,7 @@ func (t *wsTransport) reconnectLoop(ctx context.Context, onConnect func()) {
 		default:
 		}
 
-		if t.Connected() {
+		if t.socketOpen() {
 			// Wait a bit before checking again.
 			select {
 			case <-ctx.Done():
@@ -500,7 +523,7 @@ func (t *wsTransport) reconnectLoop(ctx context.Context, onConnect func()) {
 		// Connected — reset backoff, record the reconnect, and notify.
 		backoff = time.Second
 		atomic.AddInt64(&t.reconnectCount, 1)
-		if onConnect != nil {
+		if onConnect != nil && t.Connected() {
 			onConnect()
 		}
 
@@ -511,7 +534,7 @@ func (t *wsTransport) reconnectLoop(ctx context.Context, onConnect func()) {
 		if netCh == nil {
 			netCh = make(chan struct{}) // never fires
 		}
-		for t.Connected() {
+		for t.socketOpen() {
 			select {
 			case <-ctx.Done():
 				return

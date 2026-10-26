@@ -7,19 +7,21 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/labtether/labtether-linux/pkg/securityruntime"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
-
-	"github.com/labtether/labtether-linux/pkg/securityruntime"
 )
 
 const selfUpdateExitCode = 10
+
 const (
+	envNativeWrapperParentPID          = "LABTETHER_PARENT_PID"
 	envSelfUpdateTrustedPublicKey      = "LABTETHER_AUTO_UPDATE_TRUSTED_PUBLIC_KEY"
 	envSelfUpdateAllowExternalDownload = "LABTETHER_AUTO_UPDATE_ALLOW_EXTERNAL_DOWNLOAD"
 	envSelfUpdateAcceptUnsigned        = "LABTETHER_AUTO_UPDATE_ACCEPT_UNSIGNED"
@@ -30,6 +32,10 @@ const (
 	maxSelfUpdateURLLength             = 4096
 	maxSelfUpdateSignatureLength       = 512
 )
+
+const nativeWrapperSelfUpdateMessage = "self-update is managed by the native LabTether app; update the app instead"
+
+const selfUpdateEndpointUnavailableMessage = "auto-update endpoint unavailable"
 
 var (
 	agentExitFn       = os.Exit
@@ -76,9 +82,20 @@ func checkAndApplySelfUpdate(cfg RuntimeConfig) (bool, string, error) {
 }
 
 func checkAndApplySelfUpdateWithOptions(cfg RuntimeConfig, opts selfUpdateOptions) (bool, string, error) {
+	if nativeWrapperSelfUpdateBlocked("", runtime.GOOS) {
+		return false, nativeWrapperSelfUpdateMessage, nil
+	}
+
 	checkURL := normalizeHTTPSURL(buildAgentReleaseCheckURL(cfg))
 	if checkURL == "" {
-		return false, "auto-update endpoint unavailable", nil
+		return false, selfUpdateEndpointUnavailableMessage, nil
+	}
+	executablePath, err := executablePathFn()
+	if err != nil {
+		return false, "", fmt.Errorf("resolve executable path: %w", err)
+	}
+	if nativeWrapperSelfUpdateBlocked(executablePath, runtime.GOOS) {
+		return false, nativeWrapperSelfUpdateMessage, nil
 	}
 
 	release, err := fetchReleaseMetadata(cfg, checkURL)
@@ -102,10 +119,6 @@ func checkAndApplySelfUpdateWithOptions(cfg RuntimeConfig, opts selfUpdateOption
 		return false, "", err
 	}
 
-	executablePath, err := executablePathFn()
-	if err != nil {
-		return false, "", fmt.Errorf("resolve executable path: %w", err)
-	}
 	localSHA, err := fileSHA256(executablePath)
 	if err != nil {
 		return false, "", fmt.Errorf("hash local executable: %w", err)
@@ -134,6 +147,31 @@ func checkAndApplySelfUpdateWithOptions(cfg RuntimeConfig, opts selfUpdateOption
 		return true, fmt.Sprintf("forced update applied to %s", version), nil
 	}
 	return true, fmt.Sprintf("updated agent binary to %s", version), nil
+}
+
+func nativeWrapperSelfUpdateBlocked(executablePath, goos string) bool {
+	// Native hosts set this containment boundary for every bundled child. The
+	// host owns the signed application as one artifact, so replacing only its
+	// nested agent would invalidate the parent signature on both macOS and
+	// Windows.
+	if strings.TrimSpace(os.Getenv(envNativeWrapperParentPID)) != "" {
+		return true
+	}
+
+	// Defense in depth for a macOS bundle launched without the expected parent
+	// environment. Any executable beneath <name>.app/Contents is still part of
+	// that signed application and must be updated with the whole app.
+	if !strings.EqualFold(strings.TrimSpace(goos), "darwin") {
+		return false
+	}
+	parts := strings.Split(filepath.ToSlash(filepath.Clean(executablePath)), "/")
+	for index := 0; index+1 < len(parts); index++ {
+		if strings.HasSuffix(strings.ToLower(parts[index]), ".app") &&
+			strings.EqualFold(parts[index+1], "Contents") {
+			return true
+		}
+	}
+	return false
 }
 
 func buildAgentReleaseCheckURL(cfg RuntimeConfig) string {
@@ -306,8 +344,7 @@ func newSelfUpdateHTTPClient(cfg RuntimeConfig) *http.Client {
 			if len(via) > 0 && !sameOrigin(via[0].URL.String(), req.URL.String()) {
 				req.Header.Del("Authorization")
 			}
-			_, err := securityruntime.ValidateOutboundURL(req.URL.String())
-			return err
+			return nil
 		},
 	}
 }
