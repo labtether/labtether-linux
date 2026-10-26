@@ -2,17 +2,21 @@
 
 Telemetry, remote access, and actions for your Linux machines — reported back to your [LabTether](https://labtether.com) hub.
 
-This repository is independently tested compatibility source. Official Linux
-agent binaries are built and published by the canonical
-[`labtether-agent`](https://github.com/labtether/labtether-agent) repository;
-this repository does not publish a second competing release line.
+This repository is independently tested compatibility source. Official agent
+binaries are built and published by the canonical
+[`labtether-agent`](https://github.com/labtether/labtether-agent) repository:
+Linux and Windows for amd64 and arm64, plus a Linux container image. macOS uses
+the native [menu bar app](https://github.com/labtether/labtether-mac), and
+FreeBSD is not shipped. This repository does not publish a second release line.
 
 ## Install
 
 Use **Add Device** in the Hub console and copy its Linux install command. That
 command selects the right Hub address, sets up certificate trust, and installs
 the service. For a manual binary install, choose an exact version and follow
-the checksum and build-attestation steps in the [canonical agent guide](https://github.com/labtether/labtether-agent#linux).
+the checksum and Ed25519 signature steps in the [canonical agent guide](https://github.com/labtether/labtether-agent#linux).
+Release binaries are signed locally by the maintainers; they have no GitHub
+build attestation.
 
 To run the installed agent in the foreground with a Hub certificate already
 trusted by this machine:
@@ -59,6 +63,38 @@ go build -o labtether-agent ./cmd/labtether-agent/
 Most users should grab the pre-built binary from the canonical
 [`labtether-agent` releases](https://github.com/labtether/labtether-agent/releases/latest).
 
+### Updates for compatibility builds
+
+Self-updates require `LABTETHER_AUTO_UPDATE_TRUSTED_PUBLIC_KEY` and signed
+metadata. A missing key stops the update. Signatures use the canonical
+agent's payload (version, OS, architecture, SHA-256 and size), so canonical
+release signatures verify here. The release public key is published in the
+Hub repository at `scripts/release/agent-release-public-key.b64` and in the
+canonical agent README. `LABTETHER_AUTO_UPDATE_ACCEPT_UNSIGNED=true` is
+an explicit opt-in for development only and does not bypass a configured key.
+
+Update metadata is limited to 1 MiB. Releases must match the running OS and
+architecture and use a stable version. Older versions are rejected even for a
+forced update. Hub tokens are sent only to the configured Hub origin, never to
+a separate update mirror or a redirect on another origin.
+
+## Linux WebRTC input prerequisites
+
+X11 control requires `xdotool` and `xmodmap` in addition to the desktop capture
+stack. Install `x11-xserver-utils` on Debian/Ubuntu, `xorg-xmodmap` on Arch, or
+`xmodmap` on Fedora, openSUSE and Alpine. Missing or failed keymap tools leave
+X11 WebRTC control unavailable.
+
+The agent reads the current X11 keymap for each new key press. Repeats, release
+and disconnect cleanup use the physical key number saved for that press.
+This keeps a layout change from redirecting cleanup and lets controllers share
+held keys without releasing each other's holds. Keys absent from the server
+keymap fail explicitly; the agent does not change the keymap or add implicit
+modifier presses. A bounded internal XTEST helper sends keys without changing
+the active XKB layout group. A custom `LABTETHER_EXEC_ALLOWED_BINARIES` list
+must permit `labtether-x11-input` as well as `xdotool` and `xmodmap`; the default
+policy already allows all three.
+
 ## Links
 
 | | |
@@ -67,6 +103,12 @@ Most users should grab the pre-built binary from the canonical
 | **Docs** | [labtether.com/docs](https://labtether.com/docs) |
 | **Website** | [labtether.com](https://labtether.com) |
 
+## Security
+
+Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
+Questions and ideas are welcome in
+[GitHub Discussions](https://github.com/labtether/labtether/discussions).
+
 ## License
 
-Copyright 2026 LabTether. All rights reserved. See [LICENSE](LICENSE).
+Licensed under the [Apache License, Version 2.0](LICENSE). Copyright 2026 LabTether.

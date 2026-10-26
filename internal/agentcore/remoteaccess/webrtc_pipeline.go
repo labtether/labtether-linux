@@ -14,6 +14,10 @@ import (
 )
 
 func (wm *WebRTCManager) WatchPipelineExit(ctx context.Context, sessionID, streamType string, cmd *exec.Cmd, logPath string, transport MessageSender) {
+	wm.watchPipelineExit(ctx, sessionID, nil, streamType, cmd, logPath, transport)
+}
+
+func (wm *WebRTCManager) watchPipelineExit(ctx context.Context, sessionID string, expected *WebRTCSession, streamType string, cmd *exec.Cmd, logPath string, transport MessageSender) {
 	err := cmd.Wait()
 	select {
 	case <-ctx.Done():
@@ -32,12 +36,13 @@ func (wm *WebRTCManager) WatchPipelineExit(ctx context.Context, sessionID, strea
 	}
 	RemoveProcessLog(logPath)
 	if streamType == "audio" {
-		wm.MarkAudioPipelineStopped(sessionID)
+		wm.markAudioPipelineStopped(sessionID, expected)
 		log.Printf("webrtc: continuing session=%s without audio after pipeline exit", sessionID)
 		return
 	}
-	wm.CleanupWithReason(sessionID, reason)
-	SendWebRTCStopped(transport, sessionID, reason)
+	if wm.cleanupSessionInstance(sessionID, expected, reason) {
+		SendWebRTCStopped(transport, sessionID, reason)
+	}
 }
 
 func StartWebRTCPipelineWithLog(cmd *exec.Cmd, pattern string) (string, error) {

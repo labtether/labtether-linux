@@ -7,7 +7,6 @@ import (
 	"github.com/labtether/labtether-linux/pkg/agentmgr"
 	"log"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -56,15 +55,16 @@ type DockerCollector struct {
 	discoveryTriggerCh    chan dockerDiscoveryTrigger
 	statsTriggerCh        chan struct{}
 
-	inventoryMu         sync.RWMutex
-	inventory           dockerInventorySnapshot
-	runningContainerIDs map[string]struct{}
-	hasPublishedFull    bool
+	inventoryMu       sync.RWMutex
+	inventory         dockerInventorySnapshot
+	runningContainers dockerRunningContainers
+	hasPublishedFull  bool
 
 	statsMu            sync.Mutex
 	statsSchedule      map[string]*dockerStatsSchedule
 	lastRunningSetHash string
 	lastStatsPublish   time.Time
+	statsCursor        string // last scheduled ID; rotate so hot containers cannot starve later IDs
 }
 
 // NewDockerCollector creates a collector. socketPath is the Docker socket path.
@@ -88,8 +88,7 @@ func NewDockerCollector(socketPath string, transport Transport, assetID string, 
 			Networks:   make(map[string]agentmgr.DockerNetworkInfo),
 			Volumes:    make(map[string]agentmgr.DockerVolumeInfo),
 		},
-		runningContainerIDs: make(map[string]struct{}),
-		statsSchedule:       make(map[string]*dockerStatsSchedule),
+		statsSchedule: make(map[string]*dockerStatsSchedule),
 	}
 }
 
@@ -302,11 +301,12 @@ func (dc *DockerCollector) refreshAndPublishContainerDelta(ctx context.Context) 
 	if err != nil {
 		return false, fmt.Errorf("containers: %w", err)
 	}
-	if len(rawContainers) > maxContainersPerHost {
+	incomplete := len(rawContainers) > maxContainersPerHost
+	if incomplete {
 		rawContainers = rawContainers[:maxContainersPerHost]
 	}
 	nextContainers, runningIDs := buildContainerInfoMap(rawContainers)
-	nextCompose := inferComposeStacks(rawContainers)
+	nextCompose := inferCompleteComposeStacks(rawContainers, incomplete)
 
 	upserts, removals := diffContainerInfoMap(previousContainers, nextContainers)
 	composeChanged := !composeStacksEqual(previousCompose, nextCompose)
@@ -324,6 +324,7 @@ func (dc *DockerCollector) refreshAndPublishContainerDelta(ctx context.Context) 
 		UpsertContainers:   upserts,
 		RemoveContainerIDs: removals,
 	}
+	delta.ComposeActionVersion, delta.ComposeEndpointID = dc.composeWireContract()
 	if composeChanged {
 		delta.ReplaceComposeStacks = true
 		delta.ComposeStacks = cloneComposeStacks(nextCompose)
@@ -337,7 +338,7 @@ func (dc *DockerCollector) refreshAndPublishContainerDelta(ctx context.Context) 
 	dc.inventoryMu.Lock()
 	dc.inventory.Containers = nextContainers
 	dc.inventory.ComposeStacks = cloneComposeStacks(nextCompose)
-	dc.runningContainerIDs = cloneStringSet(runningIDs)
+	dc.setRunningContainersLocked(runningIDs)
 	dc.inventoryMu.Unlock()
 	return true, nil
 }
@@ -373,32 +374,9 @@ func (dc *DockerCollector) sendDockerMessage(messageType string, payload any) er
 	return nil
 }
 
-func (dc *DockerCollector) replaceInventory(snapshot dockerInventorySnapshot, runningIDs map[string]struct{}) {
-	dc.inventoryMu.Lock()
-	dc.inventory = snapshot
-	dc.runningContainerIDs = cloneStringSet(runningIDs)
-	dc.inventoryMu.Unlock()
-}
-
-func (dc *DockerCollector) updateRunningContainerIDs(runningIDs map[string]struct{}) {
-	dc.inventoryMu.Lock()
-	dc.runningContainerIDs = cloneStringSet(runningIDs)
-	dc.inventoryMu.Unlock()
-}
-
-func (dc *DockerCollector) currentRunningContainerIDs() []string {
-	dc.inventoryMu.RLock()
-	ids := make([]string, 0, len(dc.runningContainerIDs))
-	for containerID := range dc.runningContainerIDs {
-		ids = append(ids, containerID)
-	}
-	dc.inventoryMu.RUnlock()
-	sort.Strings(ids)
-	return ids
-}
-
 func (dc *DockerCollector) collectFullDiscovery(ctx context.Context) (agentmgr.DockerDiscoveryData, dockerInventorySnapshot, map[string]struct{}, error) {
 	result := agentmgr.DockerDiscoveryData{HostID: dc.currentAssetID()}
+	result.ComposeActionVersion, result.ComposeEndpointID = dc.composeWireContract()
 	snapshot := dockerInventorySnapshot{
 		Containers: make(map[string]agentmgr.DockerContainerInfo),
 		Images:     make(map[string]agentmgr.DockerImageInfo),
@@ -422,13 +400,14 @@ func (dc *DockerCollector) collectFullDiscovery(ctx context.Context) (agentmgr.D
 	if err != nil {
 		return result, snapshot, nil, fmt.Errorf("containers: %w", err)
 	}
-	if len(rawContainers) > maxContainersPerHost {
+	incomplete := len(rawContainers) > maxContainersPerHost
+	if incomplete {
 		rawContainers = rawContainers[:maxContainersPerHost]
 	}
 	var runningIDs map[string]struct{}
 	snapshot.Containers, runningIDs = buildContainerInfoMap(rawContainers)
 	result.Containers = containerInfoMapToSlice(snapshot.Containers)
-	result.ComposeStacks = inferComposeStacks(rawContainers)
+	result.ComposeStacks = inferCompleteComposeStacks(rawContainers, incomplete)
 	snapshot.ComposeStacks = cloneComposeStacks(result.ComposeStacks)
 
 	if images, err := dc.client.listImages(ctx); err == nil {

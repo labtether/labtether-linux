@@ -4,39 +4,33 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/labtether/labtether-linux/internal/x11input"
 	"github.com/labtether/labtether-linux/pkg/agentmgr"
-	"os"
+	"github.com/labtether/labtether-linux/pkg/securityruntime"
 	"strconv"
 	"strings"
 )
 
 type WebRTCInputEvent struct {
-	Type    string `json:"type"`
-	KeyCode int    `json:"keyCode,omitempty"`
-	Code    string `json:"code,omitempty"`
-	Key     string `json:"key,omitempty"`
-	X       int    `json:"x,omitempty"`
-	Y       int    `json:"y,omitempty"`
-	Button  int    `json:"button,omitempty"`
-	DeltaY  int    `json:"deltaY,omitempty"`
-}
-
-func InjectInputEvents(ctx context.Context, ch <-chan WebRTCInputEvent, display, xauthPath string, sess *WebRTCSession) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case evt := <-ch:
-			InjectSingleInput(evt, display, xauthPath, sess)
-		}
-	}
+	x11Keycode uint8  // resolved internally; never accepted from the wire
+	Type       string `json:"type"`
+	KeyCode    int    `json:"keyCode,omitempty"`
+	Code       string `json:"code,omitempty"`
+	Key        string `json:"key,omitempty"`
+	X          int    `json:"x,omitempty"`
+	Y          int    `json:"y,omitempty"`
+	Button     int    `json:"button,omitempty"`
+	DeltaY     int    `json:"deltaY,omitempty"`
 }
 
 func BuildWaylandPipeWireEnv(session DesktopSessionInfo) []string {
-	env := os.Environ()
+	env := securityruntime.SanitizedChildEnv()
 	filtered := make([]string, 0, len(env)+2)
 	for _, e := range env {
-		if strings.HasPrefix(e, "XDG_RUNTIME_DIR=") {
+		if strings.HasPrefix(e, "XDG_RUNTIME_DIR=") ||
+			strings.HasPrefix(e, "WAYLAND_DISPLAY=") ||
+			strings.HasPrefix(e, "DISPLAY=") ||
+			strings.HasPrefix(e, "XAUTHORITY=") {
 			continue
 		}
 		filtered = append(filtered, e)
@@ -44,56 +38,74 @@ func BuildWaylandPipeWireEnv(session DesktopSessionInfo) []string {
 	if runtimeDir := strings.TrimSpace(session.XDGRuntimeDir); runtimeDir != "" {
 		filtered = append(filtered, "XDG_RUNTIME_DIR="+runtimeDir)
 	}
+	if waylandDisplay := strings.TrimSpace(session.WaylandDisplay); waylandDisplay != "" {
+		filtered = append(filtered, "WAYLAND_DISPLAY="+waylandDisplay)
+	}
 	return filtered
 }
 
-func InjectSingleInput(evt WebRTCInputEvent, display, xauthPath string, sess *WebRTCSession) {
+func InjectSingleInput(evt WebRTCInputEvent, display, xauthPath string, sess *WebRTCSession) error {
+	ctx := context.Background()
+	evt.Type = strings.TrimSpace(strings.ToLower(evt.Type))
+	if sess == nil || sess.sessionInfo.Type != DesktopSessionTypeWayland {
+		resolved, err := resolveWebRTCX11Input(ctx, evt, display, xauthPath)
+		if err != nil {
+			return err
+		}
+		evt = resolved
+	}
+	return injectSingleInputContext(ctx, evt, display, xauthPath, sess)
+}
+
+func injectSingleInputContext(ctx context.Context, evt WebRTCInputEvent, display, xauthPath string, sess *WebRTCSession) error {
 	eventType := strings.TrimSpace(strings.ToLower(evt.Type))
 	if eventType == "" {
-		return
+		return fmt.Errorf("input event type is required")
 	}
 	if sess != nil && sess.sessionInfo.Type == DesktopSessionTypeWayland {
-		InjectWaylandInputEvent(evt, sess)
-		return
+		return injectWaylandInputContext(ctx, evt, sess)
 	}
 	if strings.TrimSpace(display) == "" {
 		display = ":0"
 	}
 
-	run := func(args ...string) {
-		cmd, err := NewWebRTCSecurityCommand("xdotool", args...)
-		if err != nil {
-			return
-		}
-		cmd.Env = BuildX11ClientEnv(display, xauthPath)
-		_ = cmd.Run()
+	run := func(args ...string) error {
+		return runWebRTCInputCommandContext(ctx, "xdotool", BuildX11ClientEnv(display, xauthPath), args...)
 	}
 
 	switch eventType {
-	case "keydown":
-		if keyArg, ok := X11KeyArgument(evt); ok {
-			run("keydown", keyArg)
-			return
+	case "keydown", "keyup":
+		keyArg, err := x11RawKeyArgument(evt)
+		if err != nil {
+			return err
 		}
-		run("keydown", fmt.Sprintf("0x%x", evt.KeyCode))
-	case "keyup":
-		if keyArg, ok := X11KeyArgument(evt); ok {
-			run("keyup", keyArg)
-			return
+		operation := "up"
+		if eventType == "keydown" {
+			operation = "down"
 		}
-		run("keyup", fmt.Sprintf("0x%x", evt.KeyCode))
+		return runWebRTCInputCommandContext(ctx, x11input.PolicyName, BuildX11ClientEnv(display, xauthPath), operation, keyArg)
 	case "mousemove":
-		run("mousemove", "--screen", "0", strconv.Itoa(evt.X), strconv.Itoa(evt.Y))
+		if sess != nil {
+			evt = sess.inputGeometry.mapInput(evt)
+		}
+		screen := "0"
+		if _, selected, ok := strings.Cut(NormalizeX11DisplayIdentifier(display), "."); ok {
+			screen = selected
+		}
+		return run("mousemove", "--screen", screen, strconv.Itoa(evt.X), strconv.Itoa(evt.Y))
 	case "mousedown":
-		run("mousedown", strconv.Itoa(evt.Button+1))
+		return run("mousedown", strconv.Itoa(evt.Button+1))
 	case "mouseup":
-		run("mouseup", strconv.Itoa(evt.Button+1))
+		return run("mouseup", strconv.Itoa(evt.Button+1))
 	case "scroll":
 		if evt.DeltaY < 0 {
-			run("click", "4")
+			return run("click", "4")
 		} else if evt.DeltaY > 0 {
-			run("click", "5")
+			return run("click", "5")
 		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported X11 input event type %q", eventType)
 	}
 }
 
@@ -110,46 +122,55 @@ func X11KeyArgument(evt WebRTCInputEvent) (string, bool) {
 	return "", false
 }
 
-func InjectWaylandInputEvent(evt WebRTCInputEvent, sess *WebRTCSession) {
+func InjectWaylandInputEvent(evt WebRTCInputEvent, sess *WebRTCSession) error {
+	return injectWaylandInputContext(context.Background(), evt, sess)
+}
+
+func injectWaylandInputContext(ctx context.Context, evt WebRTCInputEvent, sess *WebRTCSession) error {
 	if sess == nil {
-		return
+		return fmt.Errorf("Wayland input session is required")
 	}
 	backend := ResolveWaylandInputBackend(sess.inputBackend)
 	if backend != "ydotool" {
-		return
+		return fmt.Errorf("Wayland input backend %q is unavailable", backend)
 	}
 
-	run := func(args ...string) {
-		cmd, err := NewWebRTCSecurityCommand("ydotool", args...)
-		if err != nil {
-			return
-		}
-		_ = cmd.Run()
+	run := func(args ...string) error {
+		return runWebRTCInputCommandContext(ctx, "ydotool", BuildWaylandPipeWireEnv(sess.sessionInfo), args...)
 	}
 
 	switch strings.TrimSpace(strings.ToLower(evt.Type)) {
 	case "keydown", "keyup":
 		code, ok := DomCodeToLinuxInputCode(strings.TrimSpace(evt.Code))
 		if !ok {
-			return
+			return fmt.Errorf("unsupported Wayland key code %q", strings.TrimSpace(evt.Code))
 		}
 		state := "0"
 		if strings.EqualFold(strings.TrimSpace(evt.Type), "keydown") {
 			state = "1"
 		}
-		run("key", fmt.Sprintf("%d:%s", code, state))
+		return run("key", fmt.Sprintf("%d:%s", code, state))
 	case "mousemove":
-		run("mousemove", "--absolute", "-x", strconv.Itoa(evt.X), "-y", strconv.Itoa(evt.Y))
+		return run("mousemove", "--absolute", "-x", strconv.Itoa(evt.X), "-y", strconv.Itoa(evt.Y))
 	case "mousedown":
-		if buttonCode, ok := BrowserButtonToYdotoolButton(evt.Button); ok {
-			run("click", buttonCode)
+		if buttonCode, ok := BrowserButtonToYdotoolButtonState(evt.Button, true); ok {
+			return run("click", buttonCode)
 		}
+		return fmt.Errorf("unsupported Wayland mouse button %d", evt.Button)
+	case "mouseup":
+		if buttonCode, ok := BrowserButtonToYdotoolButtonState(evt.Button, false); ok {
+			return run("click", buttonCode)
+		}
+		return fmt.Errorf("unsupported Wayland mouse button %d", evt.Button)
 	case "scroll":
 		if evt.DeltaY < 0 {
-			run("click", "0xC3")
+			return run("mousemove", "--wheel", "-x", "0", "-y", "1")
 		} else if evt.DeltaY > 0 {
-			run("click", "0xC4")
+			return run("mousemove", "--wheel", "-x", "0", "-y", "-1")
 		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported Wayland input event type %q", strings.TrimSpace(strings.ToLower(evt.Type)))
 	}
 }
 
@@ -168,15 +189,38 @@ func ResolveWaylandInputBackend(configured string) string {
 }
 
 func BrowserButtonToYdotoolButton(button int) (string, bool) {
+	base, ok := browserButtonToYdotoolBase(button)
+	if !ok {
+		return "", false
+	}
+	return fmt.Sprintf("0x%X", 0xC0|base), true
+}
+
+// BrowserButtonToYdotoolButtonState maps browser button identifiers to the
+// ydotool click bitmask. 0x40 emits button-down only and 0x80 emits button-up
+// only, preserving drag state across separate WebRTC events.
+func BrowserButtonToYdotoolButtonState(button int, pressed bool) (string, bool) {
+	base, ok := browserButtonToYdotoolBase(button)
+	if !ok {
+		return "", false
+	}
+	mask := 0x80
+	if pressed {
+		mask = 0x40
+	}
+	return fmt.Sprintf("0x%X", mask|base), true
+}
+
+func browserButtonToYdotoolBase(button int) (int, bool) {
 	switch button {
 	case 0:
-		return "0xC0", true
+		return 0, true
 	case 1:
-		return "0xC2", true
+		return 2, true
 	case 2:
-		return "0xC1", true
+		return 1, true
 	default:
-		return "", false
+		return 0, false
 	}
 }
 

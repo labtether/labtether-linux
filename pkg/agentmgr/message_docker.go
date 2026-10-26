@@ -63,21 +63,26 @@ type DockerVolumeInfo struct {
 
 // DockerComposeStack describes an inferred Compose stack.
 type DockerComposeStack struct {
-	Name       string   `json:"name"`
-	Status     string   `json:"status"`
-	ConfigFile string   `json:"config_file,omitempty"`
-	Containers []string `json:"containers"`
+	Name           string   `json:"name"`
+	Status         string   `json:"status"`
+	ConfigFile     string   `json:"config_file,omitempty"`
+	ConfigDir      string   `json:"config_dir,omitempty"`
+	ConfigFiles    []string `json:"config_files,omitempty"`
+	SelectionError string   `json:"selection_error,omitempty"`
+	Containers     []string `json:"containers"`
 }
 
 // DockerDiscoveryData is the payload for docker.discovery messages.
 type DockerDiscoveryData struct {
-	HostID        string                `json:"host_id"`
-	Engine        DockerEngineInfo      `json:"engine"`
-	Containers    []DockerContainerInfo `json:"containers"`
-	Images        []DockerImageInfo     `json:"images"`
-	Networks      []DockerNetworkInfo   `json:"networks"`
-	Volumes       []DockerVolumeInfo    `json:"volumes"`
-	ComposeStacks []DockerComposeStack  `json:"compose_stacks"`
+	HostID               string                `json:"host_id"`
+	ComposeEndpointID    string                `json:"compose_endpoint_id,omitempty"`
+	ComposeActionVersion int                   `json:"compose_action_version,omitempty"` // 2 supports ordered config-file selection.
+	Engine               DockerEngineInfo      `json:"engine"`
+	Containers           []DockerContainerInfo `json:"containers"`
+	Images               []DockerImageInfo     `json:"images"`
+	Networks             []DockerNetworkInfo   `json:"networks"`
+	Volumes              []DockerVolumeInfo    `json:"volumes"`
+	ComposeStacks        []DockerComposeStack  `json:"compose_stacks"`
 }
 
 // DockerDiscoveryDeltaData is the payload for docker.discovery.delta messages.
@@ -85,6 +90,8 @@ type DockerDiscoveryData struct {
 // a full docker.discovery snapshot on every change.
 type DockerDiscoveryDeltaData struct {
 	HostID               string                `json:"host_id"`
+	ComposeEndpointID    string                `json:"compose_endpoint_id,omitempty"`
+	ComposeActionVersion int                   `json:"compose_action_version,omitempty"`
 	Engine               *DockerEngineInfo     `json:"engine,omitempty"`
 	UpsertContainers     []DockerContainerInfo `json:"upsert_containers,omitempty"`
 	RemoveContainerIDs   []string              `json:"remove_container_ids,omitempty"`
@@ -212,13 +219,16 @@ type DockerExecCloseData struct {
 	Reason    string `json:"reason,omitempty"`
 }
 
-// DockerComposeActionData is the payload for docker.compose.action messages.
+// DockerComposeActionData is the payload for legacy and v2 Compose actions.
+// V2 requires the ordered ConfigFiles selection; legacy messages omit it.
 type DockerComposeActionData struct {
-	RequestID   string `json:"request_id"`
-	StackName   string `json:"stack_name"`
-	Action      string `json:"action"` // up, down, restart, pull, deploy
-	ConfigDir   string `json:"config_dir,omitempty"`
-	ComposeYAML string `json:"compose_yaml,omitempty"`
+	RequestID   string   `json:"request_id"`
+	StackName   string   `json:"stack_name"`
+	Action      string   `json:"action"` // up, down, restart, pull, deploy
+	EndpointID  string   `json:"endpoint_id,omitempty"`
+	ConfigDir   string   `json:"config_dir,omitempty"`
+	ConfigFiles []string `json:"config_files,omitempty"`
+	ComposeYAML string   `json:"compose_yaml,omitempty"`
 }
 
 // DockerComposeResultData is the payload for docker.compose.result messages.

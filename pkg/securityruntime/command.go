@@ -102,7 +102,7 @@ var defaultAllowedExecBinaries = []string{
 	"xterm",
 	"yum",
 	"xclip",
-	"xdotool",
+	"xdotool", "xmodmap", "labtether-x11-input",
 	"ydotool",
 	"xrandr",
 	"xsel",

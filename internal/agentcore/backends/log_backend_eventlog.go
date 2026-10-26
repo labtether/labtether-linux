@@ -15,9 +15,9 @@ import (
 )
 
 const (
-	wevtutilQueryCommandTimeout  = 20 * time.Second
-	wevtutilStreamPollInterval   = 5 * time.Second
-	wevtutilDefaultChannels      = "System,Application"
+	wevtutilQueryCommandTimeout = 20 * time.Second
+	wevtutilStreamPollInterval  = 5 * time.Second
+	wevtutilDefaultChannels     = "System,Application"
 )
 
 // WindowsLogBackend implements LogBackend using wevtutil on Windows.
@@ -193,7 +193,7 @@ func parseWevtutilOutput(raw []byte) ([]agentmgr.LogStreamData, error) {
 	var entries []agentmgr.LogStreamData
 
 	scanner := bufio.NewScanner(bytes.NewReader(raw))
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	scanner.Buffer(nil, 256*1024) // Grow for long lines; keep idle streams small.
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
 		if len(line) == 0 {

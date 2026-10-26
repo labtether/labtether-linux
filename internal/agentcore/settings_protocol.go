@@ -8,8 +8,12 @@ import (
 	"github.com/labtether/labtether-linux/pkg/agentmgr"
 )
 
-func sendAgentSettingsState(transport *wsTransport, runtime *Runtime, revision string) {
-	if transport == nil || runtime == nil || !transport.Connected() {
+func sendAgentSettingsState(transport agentMessageSender, runtime *Runtime, revision string) {
+	if transport == nil || runtime == nil {
+		return
+	}
+
+	if connected, ok := transport.(interface{ Connected() bool }); ok && !connected.Connected() {
 		return
 	}
 

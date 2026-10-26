@@ -15,7 +15,7 @@ import (
 
 // handleSSHKeyInstall installs the hub's SSH public key into the current user's
 // authorized_keys file, enabling zero-config SSH access from the hub.
-func handleSSHKeyInstall(transport *wsTransport, msg agentmgr.Message) {
+func handleSSHKeyInstall(transport agentMessageSender, msg agentmgr.Message) {
 	var req agentmgr.SSHKeyInstallData
 	if err := json.Unmarshal(msg.Data, &req); err != nil {
 		log.Printf("ssh-key: invalid install request: %v", err)
@@ -65,7 +65,7 @@ func handleSSHKeyInstall(transport *wsTransport, msg agentmgr.Message) {
 
 // handleSSHKeyRemove removes the hub's SSH public key from the current user's
 // authorized_keys file, used during asset decommissioning.
-func handleSSHKeyRemove(transport *wsTransport, msg agentmgr.Message) {
+func handleSSHKeyRemove(transport agentMessageSender, msg agentmgr.Message) {
 	var req agentmgr.SSHKeyRemoveData
 	if err := json.Unmarshal(msg.Data, &req); err != nil {
 		log.Printf("ssh-key: invalid remove request: %v", err)

@@ -61,7 +61,7 @@ func TestIsKnownMessageType_RejectsUnknown(t *testing.T) {
 func TestKnownMessageTypesCountMatchesConstants(t *testing.T) {
 	// Keep this in sync with message.go as new protocol capabilities are added.
 	// If a new constant is added but not to KnownMessageTypes, this test fails.
-	const expectedCount = 119
+	const expectedCount = 120
 	if len(KnownMessageTypes) != expectedCount {
 		t.Errorf("KnownMessageTypes has %d entries, want %d (did you add a new message type?)",
 			len(KnownMessageTypes), expectedCount)
@@ -75,7 +75,7 @@ func TestDockerMessageTypesAreKnown(t *testing.T) {
 		MsgDockerLogsStart, MsgDockerLogsStop, MsgDockerLogsStream,
 		MsgDockerExecStart, MsgDockerExecStarted, MsgDockerExecData,
 		MsgDockerExecInput, MsgDockerExecResize, MsgDockerExecClose, MsgDockerExecClosed,
-		MsgDockerComposeAction, MsgDockerComposeResult,
+		MsgDockerComposeAction, MsgDockerComposeActionV2, MsgDockerComposeResult,
 	}
 	for _, msgType := range dockerTypes {
 		if !IsKnownMessageType(msgType) {

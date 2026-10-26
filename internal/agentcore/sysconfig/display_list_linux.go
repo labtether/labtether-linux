@@ -17,15 +17,18 @@ import (
 // still in root during incremental extraction). The parent agentcore package
 // wires these at init time.
 var (
-	DetectDesktopSessionTypeFn func() string                     // returns session type string
-	PreferredX11DisplayFn      func() string                     // returns preferred X11 DISPLAY value
-	WakeX11DisplayFn           func(display, xauthPath string)   // wakes the display
+	DetectDesktopSessionTypeFn func() string                   // returns session type string
+	PreferredX11DisplayFn      func() string                   // returns preferred X11 DISPLAY value
+	WakeX11DisplayFn           func(display, xauthPath string) // wakes the display
 	BuildX11ClientEnvFn        func(display, xauthPath string) []string
 	NewDisplayListCommand      = securityruntime.NewCommandContext
 )
 
 // DesktopSessionTypeWayland is the session type constant for Wayland sessions.
 const DesktopSessionTypeWayland = "wayland"
+
+// DesktopSessionTypeX11 is the session type constant for X11 sessions.
+const DesktopSessionTypeX11 = "x11"
 
 func PlatformListDisplays() ([]agentmgr.DisplayInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

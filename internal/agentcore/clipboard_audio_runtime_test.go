@@ -7,8 +7,8 @@ import (
 	"errors"
 	"io"
 
-	"github.com/labtether/labtether-linux/internal/agentcore/sysconfig"
 	"github.com/labtether/labtether-linux/internal/agentcore/remoteaccess"
+	"github.com/labtether/labtether-linux/internal/agentcore/sysconfig"
 	"strings"
 	"testing"
 	"time"
@@ -255,7 +255,7 @@ func TestAudioSidebandManagerHandleAudioStopCancelsSession(t *testing.T) {
 		t.Fatalf("state=%q, want started", started.State)
 	}
 
-	manager.HandleAudioStop(agentmgr.Message{
+	manager.HandleAudioStop(transport, agentmgr.Message{
 		Type: agentmgr.MsgDesktopAudioStop,
 		Data: mustMarshalDesktopRuntime(t, agentmgr.DesktopAudioStopData{SessionID: "sess-stop"}),
 	})

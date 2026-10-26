@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,44 +16,60 @@ import (
 var StartAudioCapture = PlatformStartAudioCapture
 
 const (
-	audioDefaultBitrate = 128000
-	audioChunkSize      = 4096 // bytes per audio data message
+	audioDefaultBitrate      = 128000
+	audioChunkSize           = 4096 // bytes per audio data message
+	MaxAudioSidebandSessions = 10
 )
+
+type AudioSidebandSession struct {
+	cancel context.CancelFunc
+}
 
 // AudioSidebandManager manages audio capture sessions for VNC desktop sessions.
 // On Linux it shells out to ffmpeg for PulseAudio → Opus encoding.
 // On other platforms it reports "unavailable".
 type AudioSidebandManager struct {
 	Mu       sync.Mutex
-	Sessions map[string]context.CancelFunc // sessionID → cancel
+	Sessions map[string]*AudioSidebandSession
 }
 
 func NewAudioSidebandManager() *AudioSidebandManager {
 	return &AudioSidebandManager{
-		Sessions: make(map[string]context.CancelFunc),
+		Sessions: make(map[string]*AudioSidebandSession),
 	}
 }
 
 // closeAll stops all active audio capture sessions.
 func (m *AudioSidebandManager) CloseAll() {
 	m.Mu.Lock()
-	defer m.Mu.Unlock()
-	for sid, cancel := range m.Sessions {
-		cancel()
+	sessions := make([]*AudioSidebandSession, 0, len(m.Sessions))
+	for sid, session := range m.Sessions {
+		sessions = append(sessions, session)
 		delete(m.Sessions, sid)
+	}
+	m.Mu.Unlock()
+	for _, session := range sessions {
+		session.cancel()
 	}
 }
 
 // handleAudioStart processes a desktop.audio.start message from the hub.
 func (m *AudioSidebandManager) HandleAudioStart(transport MessageSender, msg agentmgr.Message) {
+	if start := m.PrepareAudioStart(transport, msg); start != nil {
+		start()
+	}
+}
+
+func (m *AudioSidebandManager) PrepareAudioStart(transport MessageSender, msg agentmgr.Message) func() {
 	var req agentmgr.DesktopAudioStartData
 	if err := json.Unmarshal(msg.Data, &req); err != nil {
 		log.Printf("audio: invalid start request: %v", err)
-		return
+		return nil
 	}
+	req.SessionID = strings.TrimSpace(req.SessionID)
 	if req.SessionID == "" {
 		log.Printf("audio: start request missing session_id")
-		return
+		return nil
 	}
 
 	bitrate := req.Bitrate
@@ -61,54 +78,86 @@ func (m *AudioSidebandManager) HandleAudioStart(transport MessageSender, msg age
 	}
 
 	m.Mu.Lock()
-	// Stop any existing session for this ID.
-	if cancel, ok := m.Sessions[req.SessionID]; ok {
-		cancel()
-		delete(m.Sessions, req.SessionID)
+	existing := m.Sessions[req.SessionID]
+	if existing != nil {
+		m.Mu.Unlock()
+		return func() { m.sendState(transport, req.SessionID, "unavailable", "audio session already exists") }
 	}
-	ctx, cancel := context.WithCancel(context.Background()) // #nosec G118 -- Cancel is stored in the session map and invoked by HandleAudioStop/CloseAll.
-	m.Sessions[req.SessionID] = cancel
+	if existing == nil && len(m.Sessions) >= MaxAudioSidebandSessions {
+		m.Mu.Unlock()
+		return func() { m.sendState(transport, req.SessionID, "unavailable", "too many concurrent audio sessions") }
+	}
+	startCtx := context.Background()
+	if owner, ok := transport.(interface{ Context() context.Context }); ok {
+		startCtx = owner.Context()
+	}
+	ctx, cancel := context.WithCancel(startCtx) // #nosec G118 -- Cancel is stored in the session map and invoked by HandleAudioStop/CloseAll.
+	session := &AudioSidebandSession{cancel: cancel}
+	m.Sessions[req.SessionID] = session
 	m.Mu.Unlock()
 
-	go m.runCapture(ctx, transport, req.SessionID, bitrate)
+	return func() { go m.runCapture(ctx, transport, req.SessionID, bitrate, session) }
 }
 
 // handleAudioStop processes a desktop.audio.stop message from the hub.
-func (m *AudioSidebandManager) HandleAudioStop(msg agentmgr.Message) {
+func (m *AudioSidebandManager) HandleAudioStop(transport MessageSender, msg agentmgr.Message) {
+	if stop := m.PrepareAudioStop(transport, msg); stop != nil {
+		stop()
+	}
+}
+
+func (m *AudioSidebandManager) PrepareAudioStop(transport MessageSender, msg agentmgr.Message) func() {
 	var req agentmgr.DesktopAudioStopData
 	if err := json.Unmarshal(msg.Data, &req); err != nil {
 		log.Printf("audio: invalid stop request: %v", err)
-		return
+		return nil
 	}
 
+	req.SessionID = strings.TrimSpace(req.SessionID)
 	m.Mu.Lock()
-	if cancel, ok := m.Sessions[req.SessionID]; ok {
-		cancel()
+	session, ok := m.Sessions[req.SessionID]
+	if ok {
 		delete(m.Sessions, req.SessionID)
 	}
 	m.Mu.Unlock()
+	if ok {
+		session.cancel()
+		return func() {
+			if transport != nil {
+				m.sendState(transport, req.SessionID, "stopped", "")
+			}
+		}
+	}
+	return nil
 }
 
 // runCapture starts platform-specific audio capture and streams data to the hub.
-func (m *AudioSidebandManager) runCapture(ctx context.Context, transport MessageSender, sessionID string, bitrate int) {
+func (m *AudioSidebandManager) runCapture(ctx context.Context, transport MessageSender, sessionID string, bitrate int, session *AudioSidebandSession) {
+	defer session.cancel()
+	if ctx.Err() != nil {
+		m.removeCanceledCapture(sessionID, session)
+		return
+	}
 	reader, err := StartAudioCapture(ctx, sessionID, bitrate)
 	if err != nil {
 		log.Printf("audio: capture unavailable for session %s: %v", sessionID, err)
-		m.sendState(transport, sessionID, "unavailable", err.Error())
-		m.Mu.Lock()
-		delete(m.Sessions, sessionID)
-		m.Mu.Unlock()
+		m.sendStateIfCurrent(transport, sessionID, session, "unavailable", err.Error(), true)
 		return
 	}
 
-	m.sendState(transport, sessionID, "started", "")
+	if closer, ok := reader.(io.Closer); ok {
+		defer closer.Close()
+	}
+	if !m.sendStateIfCurrent(transport, sessionID, session, "started", "", false) {
+		return
+	}
 	log.Printf("audio: capture started for session %s at %d bps", sessionID, bitrate)
 
 	buf := make([]byte, audioChunkSize)
 	for {
 		select {
 		case <-ctx.Done():
-			m.sendState(transport, sessionID, "stopped", "")
+			m.sendStateIfCurrent(transport, sessionID, session, "stopped", "", true)
 			return
 		default:
 		}
@@ -125,23 +174,47 @@ func (m *AudioSidebandManager) runCapture(ctx context.Context, transport Message
 			if err != nil {
 				continue
 			}
-			_ = transport.Send(agentmgr.Message{
+			if !m.sendMessageIfCurrent(transport, sessionID, session, agentmgr.Message{
 				Type: agentmgr.MsgDesktopAudioData,
 				ID:   sessionID,
 				Data: data,
-			})
+			}) {
+				return
+			}
 		}
 		if readErr != nil {
 			if readErr != io.EOF {
 				log.Printf("audio: capture read error for session %s: %v", sessionID, readErr)
 			}
-			m.sendState(transport, sessionID, "stopped", "")
-			m.Mu.Lock()
-			delete(m.Sessions, sessionID)
-			m.Mu.Unlock()
+			m.sendStateIfCurrent(transport, sessionID, session, "stopped", "", true)
 			return
 		}
 	}
+}
+
+func (m *AudioSidebandManager) sendStateIfCurrent(transport MessageSender, sessionID string, expected *AudioSidebandSession, state, errMsg string, remove bool) bool {
+	m.Mu.Lock()
+	if m.Sessions[sessionID] != expected {
+		m.Mu.Unlock()
+		return false
+	}
+	if remove {
+		delete(m.Sessions, sessionID)
+	}
+	m.Mu.Unlock()
+	m.sendState(transport, sessionID, state, errMsg)
+	return true
+}
+
+func (m *AudioSidebandManager) sendMessageIfCurrent(transport MessageSender, sessionID string, expected *AudioSidebandSession, message agentmgr.Message) bool {
+	m.Mu.Lock()
+	if m.Sessions[sessionID] != expected {
+		m.Mu.Unlock()
+		return false
+	}
+	m.Mu.Unlock()
+	_ = transport.Send(message)
+	return true
 }
 
 // sendState sends a desktop.audio.state message to the hub.
@@ -160,4 +233,12 @@ func (m *AudioSidebandManager) sendState(transport MessageSender, sessionID, sta
 		ID:   sessionID,
 		Data: data,
 	})
+}
+
+func (m *AudioSidebandManager) removeCanceledCapture(id string, session *AudioSidebandSession) {
+	m.Mu.Lock()
+	defer m.Mu.Unlock()
+	if m.Sessions[id] == session {
+		delete(m.Sessions, id)
+	}
 }

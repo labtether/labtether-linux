@@ -1,6 +1,7 @@
 package remoteaccess
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/labtether/labtether-linux/internal/x11input"
 	"github.com/labtether/labtether-linux/pkg/agentmgr"
 	"github.com/labtether/labtether-linux/pkg/securityruntime"
 )
@@ -47,6 +49,9 @@ type GstAudioConfig struct {
 }
 
 const (
+	webrtcReasonX11InputHelperBlocked      = "x11_input_helper_blocked"
+	webrtcReasonX11KeymapToolMissing       = "x11_input_xmodmap_not_found"
+	webrtcReasonX11KeymapToolProbeFailed   = "x11_input_xmodmap_probe_failed"
 	webrtcReasonUnsupportedPlatform        = "unsupported_platform"
 	webrtcReasonMissingGstLaunch           = "gst_launch_not_found"
 	webrtcReasonMissingGstInspect          = "gst_inspect_not_found"
@@ -155,15 +160,59 @@ func DetectWebRTCCapabilitiesWithConfig(cfg WebRTCConfig) agentmgr.WebRTCCapabil
 		caps.Displays = DetectX11DisplayIdentifiers()
 		caps.VNCRealDesktopSupported = true
 		caps.WebRTCRealDesktopSupported = true
+		if reason := webRTCX11KeymapUnavailableReason(session); reason != "" {
+			caps.UnavailableReason = reason
+			return caps
+		}
 		caps.Available = true
 	default:
 		caps.CaptureBackend = "ximagesrc"
 		caps.Displays = DetectX11DisplayIdentifiers()
 		caps.VNCRealDesktopSupported = false
 		caps.WebRTCRealDesktopSupported = false
+		if reason := webRTCX11KeymapUnavailableReason(session); reason != "" {
+			caps.UnavailableReason = reason
+			return caps
+		}
 		caps.Available = true
 	}
 	return caps
+}
+
+// ProbeWebRTCInputTool verifies both executable discovery and a non-mutating
+// invocation. ydotool's debug command connects to ydotoold without emitting an
+// input event, while xdotool version validates the executable before a virtual
+// X11 display is created for a headless session.
+func ProbeWebRTCInputTool(tool string, session DesktopSessionInfo) (missing bool, err error) {
+	path, lookErr := WebRTCLookPath(tool)
+	if lookErr != nil || strings.TrimSpace(path) == "" {
+		return true, lookErr
+	}
+	args := []string{"--version"}
+	env := BuildX11ClientEnv(session.Display, "")
+	if tool == "ydotool" {
+		args = []string{"debug"}
+		env = BuildWaylandPipeWireEnv(session)
+	} else if tool == "xmodmap" {
+		args = []string{"-version"}
+	}
+	_, err = runWebRTCInputCommandOutputContext(context.Background(), path, env, 4096, args...)
+	return false, err
+}
+
+func webRTCX11KeymapUnavailableReason(session DesktopSessionInfo) string {
+	missing, err := ProbeWebRTCInputTool("xmodmap", session)
+	if missing {
+		return webrtcReasonX11KeymapToolMissing
+	}
+	if err != nil {
+		log.Printf("webrtc: X11 keymap tool probe failed: %v", err)
+		return webrtcReasonX11KeymapToolProbeFailed
+	}
+	if err := securityruntime.ValidateExecBinary(x11input.PolicyName); err != nil {
+		return webrtcReasonX11InputHelperBlocked
+	}
+	return ""
 }
 
 func DetectX11DisplayIdentifiers() []string {
@@ -245,8 +294,8 @@ func BuildGStreamerVideoPipeline(cfg GstPipelineConfig) string {
 
 	return fmt.Sprintf(
 		"ximagesrc display-name=%s use-damage=false show-pointer=true ! "+
-			"video/x-raw,framerate=%d/1 ! videoconvert ! videoscale ! "+
-			"video/x-raw,width=%d,height=%d ! %s ! %s pt=96 ! "+
+			"video/x-raw,framerate=%d/1 ! videoconvert ! videoscale add-borders=false ! "+
+			"video/x-raw,width=%d,height=%d,pixel-aspect-ratio=1/1 ! %s ! %s pt=96 ! "+
 			"udpsink host=127.0.0.1 port=%d sync=false async=false",
 		display, fps, width, height, encoder, rtpPayloader, cfg.rtpPort,
 	)

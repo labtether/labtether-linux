@@ -10,7 +10,7 @@ import (
 )
 
 // handleConfigUpdate applies runtime configuration changes from the hub.
-func handleConfigUpdate(transport *wsTransport, msg agentmgr.Message, runtime *Runtime) {
+func handleConfigUpdate(transport agentMessageSender, msg agentmgr.Message, runtime *Runtime) {
 	var data agentmgr.ConfigUpdateData
 	if err := json.Unmarshal(msg.Data, &data); err != nil {
 		log.Printf("agentws: invalid config update: %v", err)
@@ -80,7 +80,7 @@ func handleConfigUpdate(transport *wsTransport, msg agentmgr.Message, runtime *R
 	})
 }
 
-func handleAgentSettingsApply(transport *wsTransport, msg agentmgr.Message, runtime *Runtime) {
+func handleAgentSettingsApply(transport agentMessageSender, msg agentmgr.Message, runtime *Runtime) {
 	var req agentmgr.AgentSettingsApplyData
 	if err := json.Unmarshal(msg.Data, &req); err != nil {
 		log.Printf("agentws: invalid agent.settings.apply: %v", err)
@@ -130,7 +130,7 @@ func handleAgentSettingsApply(transport *wsTransport, msg agentmgr.Message, runt
 	sendAgentSettingsState(transport, runtime, req.Revision)
 }
 
-func sendAgentSettingsApplied(transport *wsTransport, runtime *Runtime, response agentmgr.AgentSettingsAppliedData) {
+func sendAgentSettingsApplied(transport agentMessageSender, runtime *Runtime, response agentmgr.AgentSettingsAppliedData) {
 	if runtime != nil && runtime.deviceIdentity != nil {
 		response.Fingerprint = runtime.deviceIdentity.Fingerprint
 	}
