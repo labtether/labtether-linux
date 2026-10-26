@@ -7,7 +7,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/jezek/xgb v1.3.1
 	github.com/pion/interceptor v0.1.49
-	github.com/pion/rtp v1.10.5
+	github.com/pion/rtp v1.10.6
 	github.com/pion/webrtc/v4 v4.2.23
 	github.com/shirou/gopsutil/v4 v4.26.9
 	golang.org/x/sys v0.49.0
