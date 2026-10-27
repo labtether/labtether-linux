@@ -52,6 +52,8 @@ jobs:
         run: python3 -m unittest scripts/ci/test_line_limit.py
       - name: Enforce full-repository line limit
         run: python3 scripts/ci/check-line-limit.py
+      - name: Block personal details
+        run: python3 scripts/ci/check-private-info.py
 
   fast-contracts:
     needs: [line-limit]
@@ -178,3 +180,29 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/test-binaries"
           go build -trimpath -o "${RUNNER_TEMP}/labtether-agent-${GOOS}-${GOARCH}" ./cmd/labtether-agent
           go test -c -o "${RUNNER_TEMP}/test-binaries/" ./...
+
+  ci-result:
+    name: CI result
+    if: always()
+    needs: [line-limit, fast-contracts, cross-platform-source-contract]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require every selected check to pass
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PYCODE'
+          import json
+          import os
+          jobs = json.loads(os.environ["NEEDS_JSON"])
+          for name in ("line-limit", "fast-contracts"):
+              if jobs[name]["result"] != "success":
+                  raise SystemExit(f"Required check failed: {name}")
+          required = jobs["line-limit"]["outputs"].get("checks_required")
+          if required not in ("true", "false"):
+              raise SystemExit("Missing check selection")
+          accepted = {"success"} if required == "true" else {"success", "skipped"}
+          if jobs["cross-platform-source-contract"]["result"] not in accepted:
+              raise SystemExit("Source portability checks did not pass")
+          PYCODE

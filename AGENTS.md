@@ -4,19 +4,19 @@
 
 For Astra and Opus 5.5: edit `AGENTS.md`; keep `CLAUDE.md -> AGENTS.md`.
 Read `../AGENTS.md` once if available, or from a worktree use
-`/Users/michael/Development/LabTether/AGENTS.md`. Read only task-relevant docs.
+`$HOME/Development/LabTether/AGENTS.md`. Read only task-relevant docs.
 Finish scoped work with focused checks; make routine reversible choices yourself.
 Use current manifests, preserve unrelated dirty work, and reply in short plain words.
 
 - Reuse this repo; do not clone or copy it. Worktrees belong under
-  `/Users/michael/.codex/worktrees/LabTether/`; temp files in task `work/` or
+  `$HOME/.codex/worktrees/LabTether/`; temp files in task `work/` or
   `mktemp -d`. Create no repos, worktrees, caches or temp folders directly in
-  `/Users/michael` or `/Users/michael/Development`. Clean only your own temp files.
+  `$HOME` or `$HOME/Development`. Clean only your own temp files.
 - One broad build/suite at a time; require 100 GB free for heavy builds. Reuse
   caches. Removing user files, dirty work, repos, branches or worktrees needs
   an exact preview and explicit approval. Preview generated-cache cleanup.
-- VM 102 / `UntrustedVM` is excluded and untouched: no enumeration, queries,
-  inspection, backup, operations or QA evidence.
+- Follow the workspace no-touch target list: no enumeration, queries,
+  inspection, backup, operations or QA evidence for those targets.
 - Signing material stays local outside repos: never expose, list, copy, stage or
   upload it. Release signing/notarization needs explicit authorization; preserve owner
   signing pauses. Read workspace release rules; publish only verified distributables.
