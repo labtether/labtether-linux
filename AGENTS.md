@@ -2,29 +2,10 @@
 
 Public Linux compatibility source for the agent.
 
-For Astra and Opus 5.5: edit `AGENTS.md`; keep `CLAUDE.md -> AGENTS.md`.
-Read `../AGENTS.md` once if available, or from a worktree use
-`$HOME/Development/LabTether/AGENTS.md`. Read only task-relevant docs.
-Finish scoped work with focused checks; make routine reversible choices yourself.
-Use current manifests, preserve unrelated dirty work, and reply in short plain words.
+## Read first
 
-- Reuse this repo; do not clone or copy it. Worktrees belong under
-  `$HOME/.codex/worktrees/LabTether/`; temp files in task `work/` or
-  `mktemp -d`. Create no repos, worktrees, caches or temp folders directly in
-  `$HOME` or `$HOME/Development`. Clean only your own temp files.
-- One broad build/suite at a time; require 100 GB free for heavy builds. Reuse
-  caches. Removing user files, dirty work, repos, branches or worktrees needs
-  an exact preview and explicit approval. Preview generated-cache cleanup.
-- Follow the workspace no-touch target list: no enumeration, queries,
-  inspection, backup, operations or QA evidence for those targets.
-- Signing material stays local outside repos: never expose, list, copy, stage or
-  upload it. Release signing/notarization needs explicit authorization; preserve owner
-  signing pauses. Read workspace release rules; publish only verified distributables.
-- Prefer scoped disposable credentials or an existing session; never rotate the
-  owner password if either is available. Before temporary auth changes, install
-  restore/cleanup traps, save the exact state without logging secrets, then
-  verify restoration of its hash/timestamp and session baseline.
-- In `zsh`, use `rc` or `exit_code`, never reserved `status`.
+Codex (GPT-6 Astra) and Claude Code (Opus 5.5) both load this file. Edit
+`AGENTS.md` only; `CLAUDE.md` is a relative symlink to it.
 
 This file covers routine work in this repo. The workspace guide,
 `../AGENTS.md` (from a worktree:
