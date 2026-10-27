@@ -60,19 +60,24 @@ func NewRuntime(cfg RuntimeConfig, provider TelemetryProvider, publisher Heartbe
 	}
 }
 
+// Run keeps telemetry and the Hub connection going until ctx ends. The local
+// API is optional: a missing local token or a busy port turns it off or delays
+// it, and never stops the agent.
 func (r *Runtime) Run(ctx context.Context) error {
 	bindAddress := resolveAgentLocalBindAddress()
-	localAuthToken, err := resolveAgentLocalAuthToken(r.cfg, bindAddress)
-	if err != nil {
-		return err
-	}
+	localAuthToken, authErr := resolveAgentLocalAuthToken(r.cfg, bindAddress)
 	r.localBindAddress = bindAddress
-	r.localAuthEnabled = strings.TrimSpace(localAuthToken) != ""
+	r.localAuthEnabled = authErr == nil && strings.TrimSpace(localAuthToken) != ""
 
 	go r.collectLoop(ctx)
 	go r.heartbeatLoop(ctx)
 
-	return servicehttp.Run(ctx, servicehttp.Config{
+	if authErr != nil {
+		log.Printf("%s: local API is off: %v", r.cfg.Name, authErr)
+		<-ctx.Done()
+		return nil
+	}
+	r.serveLocalAPI(ctx, servicehttp.Config{
 		Name:        r.cfg.Name,
 		Port:        r.cfg.Port,
 		BindAddress: bindAddress,
@@ -91,6 +96,37 @@ func (r *Runtime) Run(ctx context.Context) error {
 			},
 		},
 	})
+	return nil
+}
+
+const (
+	localAPIRetryMin = 30 * time.Second
+	localAPIRetryMax = 5 * time.Minute
+)
+
+// serveLocalAPI retries a failed listen, for example when another program or
+// local user holds the port, until ctx ends.
+func (r *Runtime) serveLocalAPI(ctx context.Context, cfg servicehttp.Config) {
+	delay := localAPIRetryMin
+	for {
+		attemptCtx, cancel := context.WithCancel(ctx)
+		err := servicehttp.Run(attemptCtx, cfg)
+		cancel()
+		if ctx.Err() != nil {
+			return
+		}
+		if err == nil {
+			<-ctx.Done()
+			return
+		}
+		log.Printf("%s: local API could not start: %v; retrying in %s", r.cfg.Name, err, delay)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		delay = min(delay*2, localAPIRetryMax)
+	}
 }
 
 const (
@@ -130,9 +166,9 @@ func resolveAgentLocalAuthToken(cfg RuntimeConfig, bindAddress string) (string, 
 		log.Printf("%s: WARNING: non-loopback local API binding is unauthenticated (%s=true)", cfg.Name, envAgentLocalAllowUnauth)
 		return "", nil
 	}
-	if token := strings.TrimSpace(cfg.APIToken); token != "" {
-		return token, nil
-	}
+	// Never reuse the Hub token as the local API password. The local API is
+	// plain HTTP, so the Hub credential would cross the network, and anyone who
+	// read it could connect to the Hub as this device.
 	return "", fmt.Errorf("non-loopback local API binding requires %s or %s=true", envAgentLocalAuthToken, envAgentLocalAllowUnauth)
 }
 
@@ -149,7 +185,7 @@ func isLoopbackBindAddress(value string) bool {
 }
 
 func (r *Runtime) collectLoop(ctx context.Context) {
-	r.collectOnce(time.Now().UTC())
+	safeHandler("collect", func() { r.collectOnce(time.Now().UTC()) })
 	currentInterval := r.cfg.CollectInterval
 	ticker := time.NewTicker(currentInterval)
 	defer ticker.Stop()
@@ -160,7 +196,7 @@ func (r *Runtime) collectLoop(ctx context.Context) {
 			log.Printf("%s telemetry collector stopped", r.cfg.Name)
 			return
 		case tick := <-ticker.C:
-			r.collectOnce(tick.UTC())
+			safeHandler("collect", func() { r.collectOnce(tick.UTC()) })
 			// Check for dynamic interval override.
 			if override := r.collectIntervalOverride.Load(); override > 0 {
 				newInterval := time.Duration(override) * time.Second
@@ -175,7 +211,7 @@ func (r *Runtime) collectLoop(ctx context.Context) {
 }
 
 func (r *Runtime) heartbeatLoop(ctx context.Context) {
-	r.publishOnce(ctx)
+	safeHandler("heartbeat", func() { r.publishOnce(ctx) })
 	currentInterval := r.cfg.HeartbeatInterval
 	ticker := time.NewTicker(currentInterval)
 	defer ticker.Stop()
@@ -186,7 +222,7 @@ func (r *Runtime) heartbeatLoop(ctx context.Context) {
 			log.Printf("%s heartbeat loop stopped", r.cfg.Name)
 			return
 		case <-ticker.C:
-			r.publishOnce(ctx)
+			safeHandler("heartbeat", func() { r.publishOnce(ctx) })
 			// Check for dynamic interval override.
 			if override := r.heartbeatIntervalOverride.Load(); override > 0 {
 				newInterval := time.Duration(override) * time.Second
