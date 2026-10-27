@@ -1,114 +1,51 @@
-# LabTether Linux Agent Compatibility Source
+# LabTether Linux Agent: compatibility source
 
-Telemetry, remote access, and actions for your Linux machines — reported back to your [LabTether](https://labtether.com) hub.
+**Looking for the agent?** Install it from your
+[LabTether](https://github.com/labtether/labtether) hub (click **Add Device**)
+or get an official build from
+[labtether-agent](https://github.com/labtether/labtether-agent/releases/latest).
 
-This repository is independently tested compatibility source. Official agent
-binaries are built and published by the canonical
-[`labtether-agent`](https://github.com/labtether/labtether-agent) repository:
-Linux and Windows for amd64 and arm64, plus a Linux container image. macOS uses
-the native [menu bar app](https://github.com/labtether/labtether-mac), and
-FreeBSD is not shipped. This repository does not publish a second release line.
+This repository holds a separately tested copy of the Linux agent source. It
+does not publish its own releases. Official builds for Linux and Windows
+(amd64, arm64) and the Linux container image come from
+[labtether-agent](https://github.com/labtether/labtether-agent). macOS uses the
+[menu bar app](https://github.com/labtether/labtether-mac). FreeBSD is not
+shipped yet.
 
-## Install
+## What the agent does
 
-Use **Add Device** in the Hub console and copy its Linux install command. That
-command selects the right Hub address, sets up certificate trust, and installs
-the service. For a manual binary install, choose an exact version and follow
-the checksum and Ed25519 signature steps in the [canonical agent guide](https://github.com/labtether/labtether-agent#linux).
-Release binaries are signed locally by the maintainers; they have no GitHub
-build attestation.
+Install it on a Linux machine and your hub gets:
 
-To run the installed agent in the foreground with a Hub certificate already
-trusted by this machine:
+- live CPU, memory, disk, network and temperature
+- a terminal and remote desktop in the browser, with no SSH keys to copy around
+- systemd service control and package updates
+- Docker container status, logs and actions
 
-```bash
-umask 077
-token_file="$(mktemp)"
-trap 'rm -f "$token_file"' EXIT
-read -r -s -p 'Enrollment token: ' enrollment_token
-printf '\n'
-printf '%s\n' "$enrollment_token" > "$token_file"
-unset enrollment_token
-sudo env \
-  LABTETHER_WS_URL=wss://your-hub:8443/ws/agent \
-  LABTETHER_ENROLLMENT_TOKEN_FILE="$token_file" \
-  /usr/local/bin/labtether-agent
-```
+## Build from source
 
-For a private Hub CA, use the Hub's generated install command or set
-`LABTETHER_TLS_CA_FILE` to a trusted local CA file. For systemd setup, see the
-[full agent guide](https://labtether.com/docs/install-upgrade/agent-install-commands-by-os).
-
-On later starts, the agent restores the Hub addresses saved at enrollment. To
-move it to a new Hub address, set `LABTETHER_WS_URL` or
-`LABTETHER_API_BASE_URL`; the other address is derived from that same origin.
-If your WebSocket and API use different origins, set both variables together.
-An explicit `LABTETHER_TLS_CA_FILE` remains in use after enrollment.
-
-## What It Does
-
-- **System telemetry** — CPU, memory, disk, network, and temperature. Reported every heartbeat.
-- **Remote terminal & desktop** — Open a shell or desktop session from the LabTether console. No SSH keys needed.
-- **Service management** — Start, stop, restart systemd services from the dashboard.
-- **Package updates** — See what's outdated. Apply updates across your fleet.
-- **Docker monitoring** — Container status, logs, and lifecycle actions for Docker hosts.
-
-## Build From Source
+You need Go 1.27.3 or newer (see `go.mod`).
 
 ```bash
-# Requires Go 1.27.3+ (see go.mod)
 go build -o labtether-agent ./cmd/labtether-agent/
 ```
 
-Most users should grab the pre-built binary from the canonical
-[`labtether-agent` releases](https://github.com/labtether/labtether-agent/releases/latest).
+## More detail
 
-### Updates for compatibility builds
+- [Install and run by hand](docs/install.md), including a private hub CA and
+  moving an agent to a new hub address
+- [Self-updates for builds from this repository](docs/self-updates.md)
+- [Remote desktop input on Linux (X11)](docs/linux-desktop.md)
 
-Self-updates require `LABTETHER_AUTO_UPDATE_TRUSTED_PUBLIC_KEY` and signed
-metadata. A missing key stops the update. Signatures use the canonical
-agent's payload (version, OS, architecture, SHA-256 and size), so canonical
-release signatures verify here. The release public key is published in the
-Hub repository at `scripts/release/agent-release-public-key.b64` and in the
-canonical agent README. `LABTETHER_AUTO_UPDATE_ACCEPT_UNSIGNED=true` is
-an explicit opt-in for development only and does not bypass a configured key.
+## Contributing
 
-Update metadata is limited to 1 MiB. Releases must match the running OS and
-architecture and use a stable version. Older versions are rejected even for a
-forced update. Hub tokens are sent only to the configured Hub origin, never to
-a separate update mirror or a redirect on another origin.
+If you work with an AI coding agent, point it at [AGENTS.md](AGENTS.md) first.
+It covers the checks to run and how this repo relates to `labtether-agent`.
 
-## Linux WebRTC input prerequisites
+## Help
 
-X11 control requires `xdotool` and `xmodmap` in addition to the desktop capture
-stack. Install `x11-xserver-utils` on Debian/Ubuntu, `xorg-xmodmap` on Arch, or
-`xmodmap` on Fedora, openSUSE and Alpine. Missing or failed keymap tools leave
-X11 WebRTC control unavailable.
-
-The agent reads the current X11 keymap for each new key press. Repeats, release
-and disconnect cleanup use the physical key number saved for that press.
-This keeps a layout change from redirecting cleanup and lets controllers share
-held keys without releasing each other's holds. Keys absent from the server
-keymap fail explicitly; the agent does not change the keymap or add implicit
-modifier presses. A bounded internal XTEST helper sends keys without changing
-the active XKB layout group. A custom `LABTETHER_EXEC_ALLOWED_BINARIES` list
-must permit `labtether-x11-input` as well as `xdotool` and `xmodmap`; the default
-policy already allows all three.
-
-## Links
-
-| | |
-|---|---|
-| **LabTether Hub** | [github.com/labtether/labtether](https://github.com/labtether/labtether) |
-| **Docs** | [labtether.com/docs](https://labtether.com/docs) |
-| **Website** | [labtether.com](https://labtether.com) |
-
-## Security
-
-Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
-Questions and ideas are welcome in
-[GitHub Discussions](https://github.com/labtether/labtether/discussions).
+- [Docs](https://labtether.com/docs) and [GitHub Discussions](https://github.com/labtether/labtether/discussions)
+- Security issues: report privately as described in [SECURITY.md](SECURITY.md)
 
 ## License
 
-Licensed under the [Apache License, Version 2.0](LICENSE). Copyright 2026 LabTether.
+[Apache 2.0](LICENSE). Copyright 2026 LabTether.
