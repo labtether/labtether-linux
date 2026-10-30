@@ -8,6 +8,19 @@ import (
 	"github.com/labtether/labtether-linux/pkg/agentmgr"
 )
 
+// redactSensitiveAgentSettingValues keeps secrets such as the TURN password
+// on the agent. The Hub sees every other effective value.
+func redactSensitiveAgentSettingValues(values map[string]string) map[string]string {
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		if key == SettingKeyWebRTCTURNPass {
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
 func sendAgentSettingsState(transport agentMessageSender, runtime *Runtime, revision string) {
 	if transport == nil || runtime == nil {
 		return
@@ -24,7 +37,7 @@ func sendAgentSettingsState(transport agentMessageSender, runtime *Runtime, revi
 
 	payload := agentmgr.AgentSettingsStateData{
 		Revision:             revision,
-		Values:               runtime.ReportedAgentSettings(),
+		Values:               redactSensitiveAgentSettingValues(runtime.ReportedAgentSettings()),
 		Fingerprint:          fingerprint,
 		AllowRemoteOverrides: runtime.allowRemoteOverrides(),
 		ReportedAt:           time.Now().UTC().Format(time.RFC3339),

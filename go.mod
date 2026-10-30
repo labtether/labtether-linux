@@ -10,6 +10,7 @@ require (
 	github.com/pion/rtp v1.10.6
 	github.com/pion/webrtc/v4 v4.2.25
 	github.com/shirou/gopsutil/v4 v4.26.9
+	golang.org/x/crypto v0.58.0
 	golang.org/x/sys v0.49.0
 )
 
@@ -36,7 +37,6 @@ require (
 	github.com/tklauser/numcpus v0.12.0 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
-	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/net v0.61.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
 )

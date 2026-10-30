@@ -14,3 +14,11 @@ func safeHandler(name string, fn func()) {
 	}()
 	fn()
 }
+
+// recoverInlineMessage is deferred by handlers that run on the WebSocket
+// reader itself. A panic there would otherwise stop the agent.
+func recoverInlineMessage(name string) {
+	if err := recover(); err != nil {
+		log.Printf("handler[%s]: panic recovered: %v\n%s", name, err, debug.Stack())
+	}
+}
