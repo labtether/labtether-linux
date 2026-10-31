@@ -52,6 +52,11 @@ func TestPendingApprovalActivatesCanonicalIdentityAndHTTPFallback(t *testing.T) 
 	if got := transport.identitySnapshot(); got.assetID != "canonical-asset" || got.token != "approved-token" || got.apiBaseURL != server.URL {
 		t.Fatalf("approved identity not active: asset=%q api=%q token-present=%v", got.assetID, got.apiBaseURL, got.token != "")
 	}
+	// receiveLoop started with the tokenless startup config; commands sent after
+	// approval must use the approved credential without a restart.
+	if got := runtimeConfigWithCurrentIdentity(RuntimeConfig{}, transport); got.APIToken != "approved-token" || got.AssetID != "canonical-asset" {
+		t.Fatalf("command config after approval: asset=%q token-present=%v", got.AssetID, got.APIToken != "")
+	}
 	runtime.collectOnce(time.Now())
 	if got := runtime.current().AssetID; got != "canonical-asset" {
 		t.Fatalf("telemetry asset=%q, want canonical-asset", got)
