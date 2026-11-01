@@ -243,3 +243,37 @@ func TestDockerClientErrorHandling(t *testing.T) {
 		t.Error("expected error for 500 response")
 	}
 }
+
+// A Hub-supplied image ref or signal must stay one query value; unescaped,
+// "&force=true" would turn a plain kill or pull into a different request.
+func TestDockerClientEscapesActionQueryValues(t *testing.T) {
+	srv, client := newSecureDockerClientFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/images/create":
+			if got := r.URL.Query()["fromImage"]; len(got) != 1 || got[0] != "ghcr.io/labtether/app:latest&tag=bad" {
+				t.Errorf("fromImage query values=%q", got)
+			}
+			if injected := r.URL.Query().Get("tag"); injected != "" {
+				t.Errorf("unexpected injected tag query value %q", injected)
+			}
+		case "/containers/ct-1/kill":
+			if got := r.URL.Query()["signal"]; len(got) != 1 || got[0] != "SIGTERM&force=true" {
+				t.Errorf("signal query values=%q", got)
+			}
+			if injected := r.URL.Query().Get("force"); injected != "" {
+				t.Errorf("unexpected injected force query value %q", injected)
+			}
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	if err := client.pullImage(context.Background(), "ghcr.io/labtether/app:latest&tag=bad"); err != nil {
+		t.Fatalf("pull image: %v", err)
+	}
+	if err := client.killContainer(context.Background(), "ct-1", "SIGTERM&force=true"); err != nil {
+		t.Fatalf("kill container: %v", err)
+	}
+}

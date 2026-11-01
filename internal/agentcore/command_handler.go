@@ -125,28 +125,33 @@ func receiveLoop(ctx context.Context, transport *wsTransport, cfg RuntimeConfig,
 		}
 
 		dispatch := func(name string, handle func()) { launchConnectionHandler(sender, sem, nil, name, handle) }
+		// Lightweight handlers run on this reader; a panic must not end it.
+		inline := func(handle func()) { safeHandler(msg.Type, handle) }
+		// An agent approved over this WebSocket got its token after the loop
+		// started, so commands read the credential the transport holds now.
+		messageConfig := runtimeConfigWithCurrentIdentity(cfg, transport)
 
 		switch msg.Type {
 		case agentmgr.MsgCommandRequest:
 			dispatch(msg.Type, func() {
-				handleCommandRequest(sender, msg, cfg)
+				handleCommandRequest(sender, msg, messageConfig)
 			})
 		case agentmgr.MsgPing:
 			// Lightweight — no semaphore.
-			_ = sender.Send(agentmgr.Message{Type: agentmgr.MsgPong})
+			inline(func() { _ = sender.Send(agentmgr.Message{Type: agentmgr.MsgPong}) })
 		case agentmgr.MsgConfigUpdate:
 			// Lightweight — no semaphore.
-			handleConfigUpdate(sender, msg, runtime)
+			inline(func() { handleConfigUpdate(sender, msg, runtime) })
 		case agentmgr.MsgAgentSettingsApply:
 			// Lightweight — no semaphore.
-			handleAgentSettingsApply(sender, msg, runtime)
+			inline(func() { handleAgentSettingsApply(sender, msg, runtime) })
 		case agentmgr.MsgUpdateRequest:
 			dispatch(msg.Type, func() {
-				handleUpdateRequest(sender, msg, cfg)
+				handleUpdateRequest(sender, msg, messageConfig)
 			})
 		case agentmgr.MsgTerminalProbe:
 			// Lightweight — no semaphore.
-			termMgr.HandleTerminalProbe(transport)
+			inline(func() { termMgr.HandleTerminalProbe(transport) })
 		case agentmgr.MsgTerminalTmuxKill:
 			dispatch(msg.Type, func() {
 				termMgr.HandleTerminalTmuxKill(sender, msg)
@@ -169,7 +174,7 @@ func receiveLoop(ctx context.Context, transport *wsTransport, cfg RuntimeConfig,
 			})
 		case agentmgr.MsgWoLSend:
 			// Lightweight — no semaphore.
-			system.HandleWoLSend(sender, msg)
+			inline(func() { system.HandleWoLSend(sender, msg) })
 		case agentmgr.MsgFileList:
 			dispatch(msg.Type, func() {
 				fileMgr.HandleFileList(sender, msg)
@@ -277,16 +282,16 @@ func receiveLoop(ctx context.Context, transport *wsTransport, cfg RuntimeConfig,
 			}
 		case agentmgr.MsgAlertNotify:
 			// Lightweight — no semaphore.
-			handleAlertNotify(msg, runtime)
+			inline(func() { handleAlertNotify(msg, runtime) })
 		case agentmgr.MsgEnrollmentChallenge:
 			// Lightweight — no semaphore.
-			handleEnrollmentChallenge(transport, msg, cfg)
+			inline(func() { handleEnrollmentChallenge(transport, msg, cfg) })
 		case agentmgr.MsgEnrollmentApproved:
 			// Lightweight — no semaphore.
-			handleEnrollmentApproved(transport, msg, cfg)
+			inline(func() { handleEnrollmentApproved(transport, msg, cfg) })
 		case agentmgr.MsgEnrollmentRejected:
 			// Lightweight — no semaphore.
-			handleEnrollmentRejected(msg)
+			inline(func() { handleEnrollmentRejected(msg) })
 		// Clipboard messages.
 		case agentmgr.MsgClipboardGet:
 			if clipMgr != nil {
@@ -319,10 +324,29 @@ func receiveLoop(ctx context.Context, transport *wsTransport, cfg RuntimeConfig,
 					webServiceCollector.RunCycle(ctx)
 				})
 			}
+		case msgPowerAction:
+			// Lightweight — no semaphore.
+			inline(func() { handlePowerActionUnsupported(sender, msg, transport.AssetID()) })
 		default:
 			log.Printf("agentws: unknown message type from hub: %s", msg.Type)
 		}
 	}
+}
+
+func runtimeConfigWithCurrentIdentity(cfg RuntimeConfig, transport *wsTransport) RuntimeConfig {
+	if transport == nil {
+		return cfg
+	}
+	identity := transport.identitySnapshot()
+	cfg.APIToken = identity.token
+	cfg.AssetID = identity.assetID
+	if identity.wsBaseURL != "" {
+		cfg.WSBaseURL = identity.wsBaseURL
+	}
+	if identity.apiBaseURL != "" {
+		cfg.APIBaseURL = identity.apiBaseURL
+	}
+	return cfg
 }
 
 // handleAlertNotify processes an alert notification from the hub and caches it locally.

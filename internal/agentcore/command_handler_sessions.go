@@ -18,6 +18,7 @@ func dispatchSessionMessage(transport *wsTransport, conn *websocket.Conn, msg ag
 		return false
 	}
 	transport.withCurrentSessionMessage(conn, func(sender *sessionMessageSender) {
+		defer recoverInlineMessage(msg.Type)
 		launch := func(name string, start func()) { launchSessionStart(sender, slots, workers, name, start) }
 		switch msg.Type {
 		case agentmgr.MsgDesktopStart:

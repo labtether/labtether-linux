@@ -110,7 +110,9 @@ func TestResolveAgentLocalAuthTokenAllowsExplicitUnauthenticatedNonLoopbackBind(
 	}
 }
 
-func TestResolveAgentLocalAuthTokenFallsBackToRuntimeAPIToken(t *testing.T) {
+// The local API password must never be the Hub token; on a non-loopback
+// bind that would expose the Hub credential to the network.
+func TestResolveAgentLocalAuthTokenRejectsRuntimeAPITokenReuse(t *testing.T) {
 	t.Setenv(envAgentLocalAuthToken, "")
 	t.Setenv(envAgentLocalAuthTokenFile, "")
 	t.Setenv(envAgentLocalAllowUnauth, "false")
@@ -119,10 +121,7 @@ func TestResolveAgentLocalAuthTokenFallsBackToRuntimeAPIToken(t *testing.T) {
 		Name:     "test-agent",
 		APIToken: "runtime-api-token",
 	}, "0.0.0.0")
-	if err != nil {
-		t.Fatalf("resolve local auth token: %v", err)
-	}
-	if token != "runtime-api-token" {
-		t.Fatalf("expected runtime API token fallback, got %q", token)
+	if err == nil || token != "" {
+		t.Fatalf("resolve local auth token = %q, %v; want rejection without the Hub token", token, err)
 	}
 }

@@ -1,0 +1,166 @@
+{
+  "schema": "labtether-agent-wire-conformance/v1",
+  "cases": [
+    {
+      "name": "compose-discovery-legacy",
+      "data_contract": "DockerDiscoveryData",
+      "message": {
+        "type": "docker.discovery",
+        "id": "compose-discovery-legacy",
+        "data": {
+          "host_id": "node-1",
+          "engine": {
+            "version": "29",
+            "api_version": "1.52",
+            "os": "linux",
+            "arch": "amd64"
+          },
+          "containers": [],
+          "images": [],
+          "networks": [],
+          "volumes": [],
+          "compose_stacks": [
+            {
+              "name": "web",
+              "status": "running",
+              "config_file": "/srv/web/compose.yaml",
+              "containers": [
+                "container-web"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "compose-delta-legacy",
+      "data_contract": "DockerDiscoveryDeltaData",
+      "message": {
+        "type": "docker.discovery.delta",
+        "id": "compose-delta-legacy",
+        "data": {
+          "host_id": "node-1",
+          "compose_stacks": [
+            {
+              "name": "web",
+              "status": "running",
+              "config_file": "/srv/web/compose.yaml",
+              "containers": [
+                "container-web"
+              ]
+            }
+          ],
+          "replace_compose_stacks": true
+        }
+      }
+    },
+    {
+      "name": "compose-action-legacy",
+      "data_contract": "DockerComposeActionData",
+      "message": {
+        "type": "docker.compose.action",
+        "id": "compose-action-legacy",
+        "data": {
+          "request_id": "compose-legacy",
+          "stack_name": "web",
+          "action": "restart",
+          "config_dir": "/srv/web"
+        }
+      }
+    },
+    {
+      "name": "compose-discovery-v2",
+      "data_contract": "DockerDiscoveryData",
+      "message": {
+        "type": "docker.discovery",
+        "id": "compose-discovery-v2",
+        "data": {
+          "host_id": "node-1",
+          "engine": {
+            "version": "29",
+            "api_version": "1.52",
+            "os": "linux",
+            "arch": "amd64"
+          },
+          "containers": [],
+          "images": [],
+          "networks": [],
+          "volumes": [],
+          "compose_stacks": [
+            {
+              "name": "web",
+              "status": "running",
+              "config_file": "/srv/web/compose.yaml",
+              "containers": [
+                "container-web"
+              ],
+              "config_dir": "/srv/web",
+              "config_files": [
+                "/srv/web/compose.yaml",
+                "/srv/web/override production.yaml"
+              ]
+            },
+            {
+              "name": "ambiguous",
+              "status": "running",
+              "containers": [
+                "container-other"
+              ],
+              "selection_error": "conflicting config selection"
+            }
+          ],
+          "compose_action_version": 2,
+          "compose_endpoint_id": "b45725e06f1a7a1b76a0cab212e2752a316cc7b59df142380761acb66c708ddc"
+        }
+      }
+    },
+    {
+      "name": "compose-delta-v2",
+      "data_contract": "DockerDiscoveryDeltaData",
+      "message": {
+        "type": "docker.discovery.delta",
+        "id": "compose-delta-v2",
+        "data": {
+          "host_id": "node-1",
+          "compose_stacks": [
+            {
+              "name": "web",
+              "status": "running",
+              "config_file": "/srv/web/compose.yaml",
+              "containers": [
+                "container-web"
+              ],
+              "config_dir": "/srv/web",
+              "config_files": [
+                "/srv/web/compose.yaml",
+                "/srv/web/override production.yaml"
+              ]
+            }
+          ],
+          "replace_compose_stacks": true,
+          "compose_action_version": 2,
+          "compose_endpoint_id": "b45725e06f1a7a1b76a0cab212e2752a316cc7b59df142380761acb66c708ddc"
+        }
+      }
+    },
+    {
+      "name": "compose-action-v2",
+      "data_contract": "DockerComposeActionData",
+      "message": {
+        "type": "docker.compose.action.v2",
+        "id": "compose-action-v2",
+        "data": {
+          "request_id": "compose-v2",
+          "stack_name": "web",
+          "action": "restart",
+          "config_dir": "/srv/web",
+          "config_files": [
+            "/srv/web/compose.yaml",
+            "/srv/web/override production.yaml"
+          ],
+          "endpoint_id": "b45725e06f1a7a1b76a0cab212e2752a316cc7b59df142380761acb66c708ddc"
+        }
+      }
+    }
+  ]
+}

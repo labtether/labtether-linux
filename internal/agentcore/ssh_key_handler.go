@@ -11,7 +11,30 @@ import (
 	"strings"
 
 	"github.com/labtether/labtether-linux/pkg/agentmgr"
+	"golang.org/x/crypto/ssh"
 )
+
+// validateAuthorizedKey accepts exactly one authorized_keys entry. Embedded
+// newlines would otherwise add extra lines, and so extra keys or options, to
+// authorized_keys. The trimmed payload is returned unchanged so removal still
+// matches the line that install wrote.
+func validateAuthorizedKey(pubKey string) (string, error) {
+	trimmed := strings.TrimSpace(pubKey)
+	if trimmed == "" {
+		return "", fmt.Errorf("public key is empty")
+	}
+	if strings.ContainsAny(trimmed, "\r\n") {
+		return "", fmt.Errorf("public key must not contain newlines")
+	}
+	_, _, _, rest, err := ssh.ParseAuthorizedKey([]byte(trimmed))
+	if err != nil {
+		return "", fmt.Errorf("invalid authorized_keys entry: %w", err)
+	}
+	if len(strings.TrimSpace(string(rest))) != 0 {
+		return "", fmt.Errorf("public key payload contains more than one entry")
+	}
+	return trimmed, nil
+}
 
 // handleSSHKeyInstall installs the hub's SSH public key into the current user's
 // authorized_keys file, enabling zero-config SSH access from the hub.
@@ -22,9 +45,9 @@ func handleSSHKeyInstall(transport agentMessageSender, msg agentmgr.Message) {
 		return
 	}
 
-	pubKey := strings.TrimSpace(req.PublicKey)
-	if pubKey == "" {
-		log.Printf("ssh-key: empty public key in install request")
+	pubKey, err := validateAuthorizedKey(req.PublicKey)
+	if err != nil {
+		log.Printf("ssh-key: rejecting install request: %v", err)
 		return
 	}
 
@@ -72,9 +95,9 @@ func handleSSHKeyRemove(transport agentMessageSender, msg agentmgr.Message) {
 		return
 	}
 
-	pubKey := strings.TrimSpace(req.PublicKey)
-	if pubKey == "" {
-		log.Printf("ssh-key: empty public key in remove request")
+	pubKey, err := validateAuthorizedKey(req.PublicKey)
+	if err != nil {
+		log.Printf("ssh-key: rejecting remove request: %v", err)
 		return
 	}
 
