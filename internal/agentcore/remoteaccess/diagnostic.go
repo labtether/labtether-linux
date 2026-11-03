@@ -83,7 +83,7 @@ func CollectDesktopDiagnostic(deskMgr *DesktopManager, webrtcMgr *WebRTCManager)
 	}
 
 	// --- Bootstrap shell ---
-	if out, err := exec.Command("pgrep", "-f", "LabTether Desktop").Output(); err == nil {
+	if out, err := exec.Command("pgrep", "-f", desktopShellTitle).Output(); err == nil {
 		if strings.TrimSpace(string(out)) != "" {
 			d.BootstrapRunning = true
 		}
