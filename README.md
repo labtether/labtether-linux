@@ -9,8 +9,7 @@ This repository holds a separately tested copy of the Linux agent source. It
 does not publish its own releases. Official builds for Linux and Windows
 (amd64, arm64) and the Linux container image come from
 [labtether-agent](https://github.com/labtether/labtether-agent). macOS uses the
-[menu bar app](https://github.com/labtether/labtether-mac). FreeBSD is not
-shipped yet.
+[menu bar app](https://github.com/labtether/labtether-mac).
 
 ## What the agent does
 
