@@ -1,15 +1,16 @@
-# LabTether Linux Agent: compatibility source
+# LabTether Linux Agent: archived
 
-**Looking for the agent?** Install it from your
-[LabTether](https://github.com/labtether/labtether) hub (click **Add Device**)
-or get an official build from
-[labtether-agent](https://github.com/labtether/labtether-agent/releases/latest).
+**This repository was archived on 2026-11-15 and is no longer updated.** It
+holds an older copy of the Linux agent source and never published releases.
 
-This repository holds a separately tested copy of the Linux agent source. It
-does not publish its own releases. Official builds for Linux and Windows
-(amd64, arm64) and the Linux container image come from
-[labtether-agent](https://github.com/labtether/labtether-agent). macOS uses the
-[menu bar app](https://github.com/labtether/labtether-mac).
+The LabTether agent is developed and released in
+[labtether-agent](https://github.com/labtether/labtether-agent). To install
+it, open your [LabTether](https://github.com/labtether/labtether) hub and click
+**Add Device**, or get an official build from the
+[labtether-agent releases](https://github.com/labtether/labtether-agent/releases/latest).
+macOS uses the [menu bar app](https://github.com/labtether/labtether-mac).
+
+The rest of this page describes the source as it was when archived.
 
 ## What the agent does
 
